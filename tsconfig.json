@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@glox/utils": ["src/utils/index.ts"],
+      "@glox/utils/*": ["src/utils/*"],
+      "@glox/schemas": ["src/schemas/index.ts"],
+      "@glox/schemas/*": ["src/schemas/*"],
+      "@glox/validations": ["src/validations/index.ts"],
+      "@glox/validations/*": ["src/validations/*"],
+      "@glox/db": ["src/models/index.ts"],
+      "@glox/db/*": ["src/models/*"],
+      "@glox/models": ["src/models/index.ts"],
+      "@glox/models/*": ["src/models/*"],
+      "@glox/integrations": ["src/integrations/index.ts"],
+      "@glox/integrations/*": ["src/integrations/*"],
+      "@glox/core": ["src/services/index.ts"],
+      "@glox/core/*": ["src/services/*"],
+      "@glox/services": ["src/services/index.ts"],
+      "@glox/services/*": ["src/services/*"]
+    },
+    "outDir": "dist"
+  },
+  "include": [
+    "src/**/*",
+    "tests/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

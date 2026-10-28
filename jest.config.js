@@ -1,0 +1,27 @@
+/** @type {import('ts-jest').JestConfigWithTsJest} */
+module.exports = {
+  preset: 'ts-jest',
+  testEnvironment: 'node',
+  testMatch: ['**/tests/**/*.test.ts'],
+  moduleNameMapper: {
+    '^@/(.*)$': '<rootDir>/src/$1',
+    '^@glox/utils/(.*)$': '<rootDir>/src/utils/$1',
+    '^@glox/utils$': '<rootDir>/src/utils/index.ts',
+    '^@glox/schemas/(.*)$': '<rootDir>/src/schemas/$1',
+    '^@glox/schemas$': '<rootDir>/src/schemas/index.ts',
+    '^@glox/validations/(.*)$': '<rootDir>/src/validations/$1',
+    '^@glox/validations$': '<rootDir>/src/validations/index.ts',
+    '^@glox/db/(.*)$': '<rootDir>/src/models/$1',
+    '^@glox/db$': '<rootDir>/src/models/index.ts',
+    '^@glox/models/(.*)$': '<rootDir>/src/models/$1',
+    '^@glox/models$': '<rootDir>/src/models/index.ts',
+    '^@glox/integrations/(.*)$': '<rootDir>/src/integrations/$1',
+    '^@glox/integrations$': '<rootDir>/src/integrations/index.ts',
+    '^@glox/core/(.*)$': '<rootDir>/src/services/$1',
+    '^@glox/core$': '<rootDir>/src/services/index.ts',
+    '^@glox/services/(.*)$': '<rootDir>/src/services/$1',
+    '^@glox/services$': '<rootDir>/src/services/index.ts',
+  },
+  testTimeout: 60000,
+  verbose: true,
+};

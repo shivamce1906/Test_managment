@@ -1,4 +1,5 @@
 import { Types } from 'mongoose';
+import { AppError, ErrorCode } from '../utils';
 
 export interface RequestContext {
   businessId?: string; // Tenant ID (empty for platform superadmin)
@@ -17,5 +18,14 @@ export interface RequestContext {
 }
 
 export function toObjectId(id: string | Types.ObjectId): Types.ObjectId {
-  return typeof id === 'string' ? new Types.ObjectId(id) : id;
+  if (!id) {
+    throw new AppError(400, ErrorCode.BAD_REQUEST, 'Invalid ID format: empty ID');
+  }
+  if (typeof id === 'string') {
+    if (!Types.ObjectId.isValid(id) || id.length !== 24) {
+      throw new AppError(400, ErrorCode.BAD_REQUEST, `Invalid ID format: ${id}`);
+    }
+    return new Types.ObjectId(id);
+  }
+  return id;
 }

@@ -61,6 +61,7 @@ export const createBillSchema = z.object({
 export const editBillSchema = createBillSchema.extend({
   reason: z.string().min(1, 'Edit reason is mandatory'),
   __v: z.number().int(),
+  payments: z.array(paymentInputSchema).optional(),
 });
 
 export const cancelBillSchema = z.object({

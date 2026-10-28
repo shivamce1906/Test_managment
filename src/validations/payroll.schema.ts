@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { objectIdSchema } from './common.schema';
 
 export const createPayrollRunSchema = z.object({
-  month: z.string().regex(/^\d{4}-\d{2}$/, 'month must be YYYY-MM'),
+  month: z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])$/, 'month must be YYYY-MM'),
 });
 
 export const adjustPayrollLineSchema = z.object({

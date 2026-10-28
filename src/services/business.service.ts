@@ -426,8 +426,31 @@ export class BusinessService {
       throw new AppError(404, 'NOT_FOUND', 'Business not found');
     }
 
+function deepMerge(target: any, source: any) {
+  for (const key of Object.keys(source)) {
+    const val = source[key];
+    if (val !== undefined) {
+      if (
+        val &&
+        typeof val === 'object' &&
+        !Array.isArray(val) &&
+        !(val instanceof Date) &&
+        !(val instanceof Types.ObjectId)
+      ) {
+        if (!target[key] || typeof target[key] !== 'object') {
+          target[key] = {};
+        }
+        deepMerge(target[key], val);
+      } else {
+        target[key] = val;
+      }
+    }
+  }
+  return target;
+}
+
     const before = business.toObject();
-    Object.assign(business, updates);
+    deepMerge(business, updates);
     await business.save();
 
     await auditService.logAction({
@@ -531,6 +554,15 @@ export class BusinessService {
     }
 
     const businessId = toObjectId(ctx.businessId!);
+    if (data.branchIds && data.branchIds.length > 0) {
+      const branches = await Branch.find({
+        _id: { $in: data.branchIds.map(toObjectId) },
+        businessId,
+      });
+      if (branches.length !== data.branchIds.length) {
+        throw new AppError(422, 'VALIDATION_ERROR', 'One or more branches do not belong to this business');
+      }
+    }
     const passwordHash = await hashPassword(data.password);
 
     return withTransaction(async (session) => {
@@ -589,6 +621,15 @@ export class BusinessService {
     const before = manager.toObject();
 
     if (updates.branchIds) {
+      if (updates.branchIds.length > 0) {
+        const branches = await Branch.find({
+          _id: { $in: updates.branchIds.map(toObjectId) },
+          businessId: toObjectId(ctx.businessId!),
+        });
+        if (branches.length !== updates.branchIds.length) {
+          throw new AppError(422, 'VALIDATION_ERROR', 'One or more branches do not belong to this business');
+        }
+      }
       manager.branchIds = updates.branchIds.map(toObjectId);
     }
     if (updates.flags) {

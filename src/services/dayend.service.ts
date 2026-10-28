@@ -46,7 +46,7 @@ export async function createExpense(
     status: 'approved',
   });
   if (closure) {
-    throw new AppError(400, ErrorCode.DAY_CLOSED, 'Cannot add expense to an approved closed day');
+    throw new AppError(409, ErrorCode.DAY_CLOSED, 'Cannot add expense to an approved closed day');
   }
 
   const expense = await Expense.create({
@@ -99,7 +99,7 @@ export async function updateExpense(
     status: 'approved',
   });
   if (closure) {
-    throw new AppError(400, ErrorCode.DAY_CLOSED, 'Cannot modify expense on an approved closed day');
+    throw new AppError(409, ErrorCode.DAY_CLOSED, 'Cannot modify expense on an approved closed day');
   }
 
   const before = expense.toObject();
@@ -149,7 +149,7 @@ export async function deleteExpense(
     status: 'approved',
   });
   if (closure) {
-    throw new AppError(400, ErrorCode.DAY_CLOSED, 'Cannot delete expense on an approved closed day');
+    throw new AppError(409, ErrorCode.DAY_CLOSED, 'Cannot delete expense on an approved closed day');
   }
 
   const before = expense.toObject();
@@ -174,14 +174,20 @@ export async function deleteExpense(
 export async function getExpenses(
   ctx: RequestContext,
   branchId: string | Types.ObjectId,
-  filter?: { fromDate?: string; toDate?: string; category?: string }
+  filter?: { fromDate?: string; toDate?: string; category?: string; date?: string }
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const query: any = { businessId: toObjectId(ctx.businessId), branchId: toObjectId(branchId), deletedAt: { $exists: false } };
-  if (filter?.fromDate || filter?.toDate) {
+  const query: any = {
+    businessId: toObjectId(ctx.businessId),
+    branchId: toObjectId(branchId),
+    deletedAt: { $in: [null, undefined] },
+  };
+  if (filter?.date) {
+    query.businessDate = filter.date;
+  } else if (filter?.fromDate || filter?.toDate) {
     query.businessDate = {};
     if (filter?.fromDate) query.businessDate.$gte = filter.fromDate;
     if (filter?.toDate) query.businessDate.$lte = filter.toDate;
@@ -299,14 +305,17 @@ export async function calculateExpected(
   const bId = toObjectId(businessId);
   const brId = toObjectId(branchId);
 
-  // 1. Opening Cash Float
   const floatEntry = await PettyCashEntry.findOne({
     businessId: bId,
     branchId: brId,
     businessDate,
     type: 'float',
   });
-  const openingCashFloat = floatEntry ? floatEntry.amountPaise : 0;
+  let openingCashFloat = floatEntry ? floatEntry.amountPaise : 0;
+  if (!floatEntry) {
+    const branch = await Branch.findOne({ _id: brId, businessId: bId });
+    openingCashFloat = branch?.pettyCashFloatPaise || 0;
+  }
 
   // 2. Bills on this date
   const bills = await Bill.find({
@@ -337,11 +346,22 @@ export async function calculateExpected(
         }
       }
     }
+  }
 
+  // 2b. Refunds processed on this businessDate (even on previous days' bills)
+  const billsWithRefunds = await Bill.find({
+    businessId: bId,
+    branchId: brId,
+    'refunds.businessDate': businessDate,
+  });
+
+  for (const bill of billsWithRefunds) {
     for (const r of bill.refunds || []) {
-      if (r.mode === 'cash') cashRefunds += r.amountPaise;
-      else if (r.mode === 'upi') upiRefunds += r.amountPaise;
-      else if (r.mode === 'card') cardRefunds += r.amountPaise;
+      if (r.businessDate === businessDate) {
+        if (r.mode === 'cash') cashRefunds += r.amountPaise;
+        else if (r.mode === 'upi') upiRefunds += r.amountPaise;
+        else if (r.mode === 'card') cardRefunds += r.amountPaise;
+      }
     }
   }
 
@@ -369,7 +389,7 @@ export async function calculateExpected(
     businessId: bId,
     branchId: brId,
     businessDate,
-    deletedAt: { $exists: false },
+    deletedAt: { $in: [null, undefined] },
   });
 
   let cashExpenses = 0;
@@ -478,7 +498,7 @@ export async function submitDayClosure(
   });
 
   if (closure && closure.status === 'approved') {
-    throw new AppError(400, ErrorCode.DAY_CLOSED, 'Cannot resubmit an approved day closure');
+    throw new AppError(409, ErrorCode.DAY_CLOSED, 'Cannot resubmit an approved day closure');
   }
 
   const expected = await calculateExpected(ctx.businessId, branchId, businessDate);
@@ -550,24 +570,38 @@ export async function approveDayClosure(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const closure = await DayClosure.findOne({
+  let closure = await DayClosure.findOne({
     businessId: toObjectId(ctx.businessId),
     branchId: toObjectId(branchId),
     businessDate,
   });
 
   if (!closure) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Day closure not found');
-  }
-
-  if (closure.status === 'approved') {
+    const expected = await calculateExpected(ctx.businessId, branchId, businessDate);
+    closure = new DayClosure({
+      businessId: toObjectId(ctx.businessId),
+      branchId: toObjectId(branchId),
+      businessDate,
+      expected: {
+        cashPaise: expected.cashPaise,
+        upiPaise: expected.upiPaise,
+        cardPaise: expected.cardPaise,
+      },
+      status: 'approved',
+      createdBy: toObjectId(ctx.userId),
+      approvedBy: toObjectId(ctx.userId),
+      approvedAt: new Date(),
+    });
+  } else if (closure.status === 'open') {
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, 'Day closure must be submitted before it can be approved');
+  } else if (closure.status === 'approved') {
     return closure;
+  } else {
+    closure.status = 'approved';
+    closure.approvedBy = toObjectId(ctx.userId);
+    closure.approvedAt = new Date();
+    (closure as any).updatedBy = toObjectId(ctx.userId);
   }
-
-  closure.status = 'approved';
-  closure.approvedBy = toObjectId(ctx.userId);
-  closure.approvedAt = new Date();
-  (closure as any).updatedBy = toObjectId(ctx.userId);
 
   // Generate Day End Summary PDF
   const branch = await Branch.findOne({ _id: toObjectId(branchId), businessId: toObjectId(ctx.businessId) });

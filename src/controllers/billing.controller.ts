@@ -19,7 +19,8 @@ export class BillingController {
 
   public createBill = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const result = await this.billingService.createBill(req.ctx, req.params.branchId, req.body);
+      const idempotencyKey = (req.header('Idempotency-Key') || req.header('idempotency-key')) as string | undefined;
+      const result = await this.billingService.createBill(req.ctx, req.params.branchId, req.body, idempotencyKey);
       res.status(201).json(result);
     } catch (err) {
       next(err);
@@ -57,6 +58,15 @@ export class BillingController {
   public decideBill = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const { decision, reason } = req.body;
+      if (decision !== 'approve' && decision !== 'reject') {
+        res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Decision must be approve or reject',
+          },
+        });
+        return;
+      }
       let result;
       if (decision === 'approve') {
         result = await this.billingService.approveBill(req.ctx, req.params.id);

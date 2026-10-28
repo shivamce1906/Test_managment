@@ -9,7 +9,8 @@ export function paiseToRupees(paise: number): number {
 }
 
 export function rupeesToPaise(rupees: number): number {
-  return Math.round(rupees * 100);
+  if (!Number.isFinite(rupees)) return 0;
+  return Math.round(Number((rupees * 100).toFixed(8)));
 }
 
 /**
@@ -38,25 +39,39 @@ export function splitGst(taxablePaise: number, gstBps: number): { cgstPaise: num
 
 /**
  * Pro-rata distribution of an integer discount or value across parts according to their weights.
- * Handles rounding error by distributing the remainder to the largest component.
+ * Uses largest-remainder method (Hare-Niemeyer) so zero-weight items get 0,
+ * no shares are negative, and shares always sum to total.
  */
 export function distributeProRata(totalAmount: number, weights: number[]): number[] {
-  const sumWeights = weights.reduce((acc, w) => acc + w, 0);
+  const sumWeights = weights.reduce((acc, w) => acc + Math.max(0, w), 0);
   if (sumWeights === 0 || totalAmount === 0) {
     return weights.map(() => 0);
   }
 
-  let allocated = 0;
-  const result: number[] = [];
-
-  for (let i = 0; i < weights.length; i++) {
-    if (i === weights.length - 1) {
-      result.push(totalAmount - allocated);
-    } else {
-      const share = Math.round((totalAmount * weights[i]) / sumWeights);
-      result.push(share);
-      allocated += share;
+  const items = weights.map((w, index) => {
+    if (w <= 0) {
+      return { index, weight: 0, floor: 0, remainder: 0 };
     }
+    const exact = (totalAmount * w) / sumWeights;
+    const floor = Math.floor(exact);
+    const remainder = exact - floor;
+    return { index, weight: w, floor, remainder };
+  });
+
+  const allocated = items.reduce((acc, it) => acc + it.floor, 0);
+  const deficit = totalAmount - allocated;
+
+  const sorted = [...items]
+    .filter((it) => it.weight > 0)
+    .sort((a, b) => b.remainder - a.remainder || b.weight - a.weight || a.index - b.index);
+
+  const result = new Array(weights.length).fill(0);
+  for (const it of items) {
+    result[it.index] = it.floor;
+  }
+
+  for (let i = 0; i < deficit && i < sorted.length; i++) {
+    result[sorted[i].index] += 1;
   }
 
   return result;

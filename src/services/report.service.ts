@@ -13,6 +13,7 @@ import {
   Lead,
   Campaign,
   WaConversation,
+  Business,
 } from '../models';
 import { AppError, ErrorCode, getBusinessDate, paiseToRupees } from '../utils';
 import { RequestContext, toObjectId } from './context';
@@ -30,11 +31,21 @@ export async function getDashboardKPIs(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
+  if (branchId) {
+    if (ctx.role === 'manager' && (!ctx.branchIds || !ctx.branchIds.map(String).includes(branchId.toString()))) {
+      throw new AppError(403, ErrorCode.FORBIDDEN, 'Manager not assigned to this branch');
+    }
+  }
+
   const today = getBusinessDate();
   const currentMonth = today.slice(0, 7);
 
   const query: any = { businessId: toObjectId(ctx.businessId) };
-  if (branchId) query.branchId = toObjectId(branchId);
+  if (branchId) {
+    query.branchId = toObjectId(branchId);
+  } else if (ctx.role === 'manager') {
+    query.branchId = { $in: (ctx.branchIds || []).map(toObjectId) };
+  }
 
   // 1. Today's summary
   const todaySummaries = await DailySummary.find({ ...query, businessDate: today });
@@ -65,12 +76,19 @@ export async function getDashboardKPIs(
   const avgTicketSizePaise = todayBillsCount > 0 ? Math.round(todaySalesPaise / todayBillsCount) : 0;
 
   // 3. Today's appointments
-  const aptQuery: any = { businessId: toObjectId(ctx.businessId), date: today };
-  if (branchId) aptQuery.branchId = toObjectId(branchId);
+  const aptQuery: any = { businessId: toObjectId(ctx.businessId), businessDate: today };
+  if (branchId) {
+    aptQuery.branchId = toObjectId(branchId);
+  } else if (ctx.role === 'manager') {
+    aptQuery.branchId = { $in: (ctx.branchIds || []).map(toObjectId) };
+  }
   const todayAppointmentsCount = await Appointment.countDocuments(aptQuery);
 
   // 4. Low stock products
-  const stockBalances = await StockBalance.find(query).populate('productId');
+  const stockBalances = await StockBalance.find(query).populate({
+    path: 'productId',
+    options: { skipTenantScope: true },
+  });
   let lowStockCount = 0;
   for (const sb of stockBalances) {
     const prod: any = sb.productId;
@@ -84,7 +102,11 @@ export async function getDashboardKPIs(
 
   // 5. Unread WhatsApp conversations
   const convQuery: any = { businessId: toObjectId(ctx.businessId), unread: { $gt: 0 } };
-  if (branchId) convQuery.branchId = toObjectId(branchId);
+  if (branchId) {
+    convQuery.branchId = toObjectId(branchId);
+  } else if (ctx.role === 'manager') {
+    convQuery.branchId = { $in: (ctx.branchIds || []).map(toObjectId) };
+  }
   const unreadWaCount = await WaConversation.countDocuments(convQuery);
 
   return {
@@ -142,11 +164,21 @@ export async function generateStandardReport(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const fromDate = params.fromDate || getBusinessDate();
-  const toDate = params.toDate || getBusinessDate();
+  if (params.branchId) {
+    if (ctx.role === 'manager' && (!ctx.branchIds || !ctx.branchIds.map(String).includes(params.branchId.toString()))) {
+      throw new AppError(403, ErrorCode.FORBIDDEN, 'Manager not assigned to this branch');
+    }
+  }
+
+  const fromDate = (params as any).from || params.fromDate || getBusinessDate();
+  const toDate = (params as any).to || params.toDate || getBusinessDate();
 
   const query: any = { businessId: toObjectId(ctx.businessId) };
-  if (params.branchId) query.branchId = toObjectId(params.branchId);
+  if (params.branchId) {
+    query.branchId = toObjectId(params.branchId);
+  } else if (ctx.role === 'manager') {
+    query.branchId = { $in: (ctx.branchIds || []).map(toObjectId) };
+  }
 
   switch (reportName) {
     case 'sales-summary': {
@@ -171,10 +203,16 @@ export async function generateStandardReport(
     }
 
     case 'branch-comparison': {
-      const summaries = await DailySummary.find({
+      const compQuery: any = {
         businessId: toObjectId(ctx.businessId),
         businessDate: { $gte: fromDate, $lte: toDate },
-      });
+      };
+      if (params.branchId) {
+        compQuery.branchId = toObjectId(params.branchId);
+      } else if (ctx.role === 'manager') {
+        compQuery.branchId = { $in: (ctx.branchIds || []).map(toObjectId) };
+      }
+      const summaries = await DailySummary.find(compQuery);
 
       const branchMap = new Map<string, any>();
       for (const s of summaries) {
@@ -321,7 +359,10 @@ export async function generateStandardReport(
     }
 
     case 'inventory-valuation': {
-      const balances = await StockBalance.find(query).populate('productId');
+      const balances = await StockBalance.find(query).populate({
+        path: 'productId',
+        options: { skipTenantScope: true },
+      });
       let totalValuationPaise = 0;
 
       const items = balances.map((b) => {
@@ -426,6 +467,11 @@ export async function generateStandardReport(
     }
 
     case 'gstr-1': {
+      const business = await Business.findById(toObjectId(ctx.businessId));
+      if (!business?.gst?.enabled) {
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'GSTR-1 report is not available when GST is disabled');
+      }
+
       const bills = await Bill.find({
         ...query,
         businessDate: { $gte: fromDate, $lte: toDate },

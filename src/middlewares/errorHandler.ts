@@ -11,7 +11,7 @@ export function errorHandler(
   const reqId = req.id || 'unknown';
 
   // 1. Glox AppError
-  if (err instanceof AppError) {
+  if (err instanceof AppError || err.name === 'AppError' || (err.statusCode && err.code)) {
     if (err.statusCode >= 500) {
       req.log ? req.log.error(err) : logger.error({ err, reqId }, 'Server error');
     }
@@ -68,12 +68,17 @@ export function errorHandler(
     });
   }
 
-  // 5. Mongoose Cast Error (Invalid ObjectId)
-  if (err.name === 'CastError') {
+  // 5. Mongoose Cast Error & BSON Error (Invalid ObjectId)
+  if (
+    err.name === 'CastError' ||
+    err.name === 'BSONError' ||
+    err.name === 'BSONTypeError' ||
+    (typeof err.message === 'string' && err.message.includes('BSON'))
+  ) {
     return res.status(400).json({
       error: {
         code: ErrorCode.BAD_REQUEST,
-        message: `Invalid ID format for ${err.path}`,
+        message: err.message || 'Invalid ID format',
       },
     });
   }
@@ -84,6 +89,16 @@ export function errorHandler(
       error: {
         code: ErrorCode.BAD_REQUEST,
         message: 'Invalid JSON payload in request body',
+      },
+    });
+  }
+
+  // 7. Payload Too Large (1MB limit exceeded)
+  if (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413) {
+    return res.status(413).json({
+      error: {
+        code: 'PAYLOAD_TOO_LARGE',
+        message: 'Request entity too large (max 1MB)',
       },
     });
   }

@@ -9,6 +9,7 @@ import {
   WaConversation,
   WaNumber,
   User,
+  DayClosure,
 } from '../../models';
 import { logger } from '../../utils';
 import { toObjectId } from '../../services';
@@ -41,26 +42,44 @@ export function createDayEndWorker(): Worker {
         const totalRevenuePaise = bills.reduce((acc, b) => acc + (b.totals?.totalPaise || 0), 0);
         const billCount = bills.length;
 
+        let expectedCashPaise = 0;
+        let upiPaise = 0;
+        let cardPaise = 0;
+        for (const b of bills) {
+          for (const p of b.payments || []) {
+            if (p.mode === 'cash') expectedCashPaise += p.amountPaise;
+            else if (p.mode === 'upi') upiPaise += p.amountPaise;
+            else if (p.mode === 'card') cardPaise += p.amountPaise;
+          }
+        }
+
+        const dayClosure = await DayClosure.findOne({
+          businessId: bId,
+          branchId: branch._id,
+          businessDate: date,
+        });
+        const statusStr = dayClosure ? (dayClosure.status === 'approved' ? 'Closed' : dayClosure.status) : 'Not closed';
+
         const pdfBuffer = await generateDayEndPdf({
           branchName: branch.name,
           businessDate: date,
-          expectedCashPaise: totalRevenuePaise,
-          countedCashPaise: totalRevenuePaise,
-          diffCashPaise: 0,
-          upiPaise: 0,
-          cardPaise: 0,
+          expectedCashPaise,
+          countedCashPaise: dayClosure?.counted?.cashPaise ?? expectedCashPaise,
+          diffCashPaise: dayClosure?.diff?.cashPaise ?? 0,
+          upiPaise,
+          cardPaise,
         });
 
         const s3Key = `reports/${bId}/${branch._id}/dayend-${date}.pdf`;
         await s3Adapter.uploadBuffer(s3Key, pdfBuffer, 'application/pdf');
 
         // Send WhatsApp report to owner if configured
-        const owner = await User.findOne({ businessId: bId, role: 'owner', status: 'active' });
-        if (owner && owner.phone && waNumber) {
+        const ownerPhone = business.ownerWhatsappPhone || (await User.findOne({ businessId: bId, role: 'owner' }))?.phone;
+        if (ownerPhone && waNumber) {
           let conversation = await WaConversation.findOne({
             businessId: bId,
             numberId: waNumber._id,
-            phone: owner.phone,
+            phone: ownerPhone,
           });
 
           if (!conversation) {
@@ -68,7 +87,7 @@ export function createDayEndWorker(): Worker {
               businessId: bId,
               numberId: waNumber._id,
               branchId: branch._id,
-              phone: owner.phone,
+              phone: ownerPhone,
               lastMessageAt: new Date(),
               unread: 0,
             });
@@ -79,7 +98,8 @@ export function createDayEndWorker(): Worker {
             conversationId: conversation._id,
             direction: 'out',
             kind: 'template',
-            variables: [branch.name, date, (totalRevenuePaise / 100).toFixed(2), String(billCount)],
+            text: `Day-end report for ${branch.name} (${date}): ${statusStr}. Cash: ${(expectedCashPaise / 100).toFixed(2)}, Total: ${(totalRevenuePaise / 100).toFixed(2)}`,
+            variables: [branch.name, date, statusStr, (totalRevenuePaise / 100).toFixed(2), String(billCount)],
             mediaKey: s3Key,
             origin: 'transactional',
             status: 'queued',
@@ -107,14 +127,18 @@ export function createDailySummaryWorker(): Worker {
       logger.info({ branchId, date }, 'Recomputing daily-summary job');
 
       const brId = toObjectId(branchId);
-      const branch = await Branch.findById(brId);
+      const branch = await Branch.findOne({ _id: brId }, null, { skipTenantScope: true });
       if (!branch) return;
 
-      const bills = await Bill.find({
-        branchId: brId,
-        businessDate: date,
-        status: { $in: ['paid', 'partly_paid'] },
-      });
+      const bills = await Bill.find(
+        {
+          branchId: brId,
+          businessDate: date,
+          status: { $in: ['paid', 'partly_paid'] },
+        },
+        null,
+        { skipTenantScope: true }
+      );
 
       let grossPaise = 0;
       let discountPaise = 0;
@@ -183,7 +207,7 @@ export function createDailySummaryWorker(): Worker {
           },
           updatedAt: new Date(),
         },
-        { upsert: true }
+        { upsert: true, skipTenantScope: true } as any
       );
     },
     { connection: connection as any, concurrency: 3 }

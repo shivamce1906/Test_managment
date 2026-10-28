@@ -94,6 +94,19 @@ export async function getChanges(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
+  if (ctx.role === 'manager') {
+    const allowedBranches = new Set((ctx.branchIds || []).map(String));
+    for (const scope of scopes) {
+      const parts = (scope as string).split(':');
+      if (parts.length > 1 && Types.ObjectId.isValid(parts[1])) {
+        const branchId = parts[1];
+        if (!allowedBranches.has(branchId)) {
+          throw new AppError(403, ErrorCode.FORBIDDEN, 'Manager not authorized to poll this branch scope');
+        }
+      }
+    }
+  }
+
   const redis = getRedisClient();
   const changes: Record<string, { changed: boolean; version: number }> = {};
 

@@ -50,6 +50,8 @@ export interface ComputeBillInput {
     points?: number;
     amountPaise?: number;
     membershipDiscountBps?: number;
+    serviceDiscountBps?: number;
+    productDiscountBps?: number;
     perSessionValuePaise?: number;
   }[];
   tips?: {
@@ -110,12 +112,20 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
       }
     }
 
-    // 2. Membership discount (if applicable)
+    // 2. Membership discount (if applicable - only applies to service and product lines)
     let membershipDiscountPaise = 0;
     const membershipRedemption = redemptions.find((r) => r.kind === 'membership');
-    if (membershipRedemption && membershipRedemption.membershipDiscountBps) {
-      const remainingVal = grossPaise - lineDiscountPaise;
-      membershipDiscountPaise = calculateBps(remainingVal, membershipRedemption.membershipDiscountBps);
+    if (membershipRedemption) {
+      let discountBps = 0;
+      if (line.kind === 'service') {
+        discountBps = membershipRedemption.serviceDiscountBps ?? membershipRedemption.membershipDiscountBps ?? 0;
+      } else if (line.kind === 'product') {
+        discountBps = membershipRedemption.productDiscountBps ?? 0;
+      }
+      if (discountBps > 0) {
+        const remainingVal = grossPaise - lineDiscountPaise;
+        membershipDiscountPaise = calculateBps(remainingVal, discountBps);
+      }
     }
 
     // Check package redemption for this line
@@ -176,7 +186,7 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
     totalTaxablePaise += taxablePaise;
 
     // GST calculation (BR-02)
-    // Tips, wallet top-ups, and dues carry no GST
+    // Tips, wallet top-ups, and gift vouchers carry no GST
     const isExemptFromGst = l.kind === 'wallet_topup' || l.kind === 'voucher';
     let gstBps = 0;
     let cgstPaise = 0;
@@ -201,7 +211,14 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
     const lineTotalPaise = taxablePaise + cgstPaise + sgstPaise;
 
     // Commission calculation (BR-03): on taxablePaise before GST
-    const computedStaff = (l.staff || []).map((st) => {
+    let computedStaff: {
+      staffId: any;
+      name: string;
+      splitBps: number;
+      commissionPaise: number;
+    }[] = [];
+
+    if (l.staff && l.staff.length > 0) {
       let baseCommissionValue = taxablePaise;
 
       // Package redemption commission basis is perSessionValuePaise
@@ -214,27 +231,54 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
         }
       }
 
-      let lineCommissionPaise = 0;
-      if (l.kind === 'service' && st.rule) {
-        if (st.rule.type === 'pct' && st.rule.value) {
-          lineCommissionPaise = calculateBps(baseCommissionValue, st.rule.value);
-        } else if (st.rule.type === 'fixed' && st.rule.value) {
-          lineCommissionPaise = st.rule.value * l.qty;
+      const calcStaffFullCommission = (st: (typeof l.staff)[0]) => {
+        let fullCommission = 0;
+        if (l.kind === 'service' && st.rule) {
+          if (st.rule.type === 'pct' && st.rule.value) {
+            fullCommission = calculateBps(baseCommissionValue, st.rule.value);
+          } else if (st.rule.type === 'fixed' && st.rule.value) {
+            fullCommission = st.rule.value * l.qty;
+          } else if (st.rule.type === 'slab' && st.rule.slabs && st.rule.slabs.length > 0) {
+            let remaining = baseCommissionValue;
+            let prevUpto = 0;
+            let slabCommission = 0;
+            for (const slab of st.rule.slabs) {
+              if (remaining <= 0) break;
+              const slabCapacity = slab.uptoPaise - prevUpto;
+              const taxableInSlab = Math.min(remaining, slabCapacity);
+              if (taxableInSlab > 0) {
+                slabCommission += calculateBps(taxableInSlab, slab.bps);
+                remaining -= taxableInSlab;
+              }
+              prevUpto = slab.uptoPaise;
+            }
+            if (remaining > 0 && st.rule.slabs.length > 0) {
+              const lastSlab = st.rule.slabs[st.rule.slabs.length - 1];
+              slabCommission += calculateBps(remaining, lastSlab.bps);
+            }
+            fullCommission = slabCommission;
+          }
+        } else if (l.kind === 'product' && st.productBps) {
+          fullCommission = calculateBps(baseCommissionValue, st.productBps);
         }
-      } else if (l.kind === 'product' && st.productBps) {
-        lineCommissionPaise = calculateBps(baseCommissionValue, st.productBps);
+        return fullCommission;
+      };
+
+      const lineCommissionPaise = calcStaffFullCommission(l.staff[0]);
+      const sumSplitBps = l.staff.reduce((acc, s) => acc + (s.splitBps || 10000), 0);
+      const weights = l.staff.map((s) => s.splitBps || 10000);
+      if (sumSplitBps < 10000) {
+        weights.push(10000 - sumSplitBps);
       }
+      const shares = distributeProRata(lineCommissionPaise, weights);
 
-      // Split commission by splitBps (out of 10000 bps)
-      const commissionPaise = calculateBps(lineCommissionPaise, st.splitBps || 10000);
-
-      return {
+      computedStaff = l.staff.map((st, sIdx) => ({
         staffId: st.staffId,
         name: st.name,
         splitBps: st.splitBps || 10000,
-        commissionPaise,
-      };
-    });
+        commissionPaise: shares[sIdx],
+      }));
+    }
 
     return {
       _id: l._id,

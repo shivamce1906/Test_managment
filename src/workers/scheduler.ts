@@ -7,7 +7,6 @@ import {
   stockAlertsQueue,
 } from './queues';
 import { logger } from '../utils';
-import { Business } from '../models';
 
 export async function setupSchedulers(): Promise<void> {
   logger.info('Initializing BullMQ recurring job schedules...');

@@ -3,6 +3,7 @@ import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import mongoose from 'mongoose';
 import { connectDb, disconnectDb } from '../../src/config/db';
 import { getRedisClient, disconnectRedis } from '../../src/integrations';
+import { resetRateLimits } from '../../src/middlewares/rateLimiter';
 
 let replSet: MongoMemoryReplSet | null = null;
 
@@ -34,6 +35,7 @@ export async function clearDb(): Promise<void> {
     await collections[key].deleteMany({});
   }
   await getRedisClient().flushall();
+  resetRateLimits();
 }
 
 export async function stopDb(): Promise<void> {

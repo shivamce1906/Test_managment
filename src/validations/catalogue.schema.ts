@@ -134,3 +134,8 @@ export const createVendorSchema = z.object({
 
 export const updateVendorSchema = createVendorSchema.partial();
 
+export const setBranchPriceSchema = z.object({
+  branchId: objectIdSchema,
+  pricePaise: z.number().int().nonnegative('Branch price must be a non-negative integer'),
+});
+

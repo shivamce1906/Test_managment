@@ -13,6 +13,9 @@ export const createBusinessSchema = z.object({
       rateBps: z.number().int().nonnegative().default(1800),
       sac: z.string().default('9983'),
       pricesInclusive: z.boolean().default(false),
+    }).refine((data) => !data.enabled || (typeof data.gstin === 'string' && data.gstin.trim().length > 0), {
+      message: 'GSTIN is required when GST is enabled',
+      path: ['gstin'],
     }),
     fyStartMonth: z.number().int().min(1).max(12).default(4),
     discountLimits: z.object({
@@ -51,6 +54,9 @@ export const updateBusinessSettingsSchema = z.object({
     rateBps: z.number().int().nonnegative().optional(),
     sac: z.string().optional(),
     pricesInclusive: z.boolean().optional(),
+  }).refine((data) => !data.enabled || (typeof data.gstin === 'string' && data.gstin.trim().length > 0), {
+    message: 'GSTIN is required when GST is enabled',
+    path: ['gstin'],
   }).optional(),
   fyStartMonth: z.number().int().min(1).max(12).optional(),
   discountLimits: z.object({

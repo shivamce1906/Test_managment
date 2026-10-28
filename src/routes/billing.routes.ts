@@ -1,19 +1,20 @@
 import { Router } from 'express';
 import { authenticate } from '../middlewares/auth.middleware';
-import { requireRole } from '../middlewares/role.middleware';
+import { requireRole, requireKind } from '../middlewares/role.middleware';
 import { requireBranchAccess } from '../middlewares/branch.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import {
   createBillSchema,
   cancelBillSchema,
   refundBillSchema,
+  editBillSchema,
   collectDueReceiptSchema,
 } from '../validations';
 import { billingController } from '../controllers/billing.controller';
 
 export const billingRouter = Router();
 
-billingRouter.use(authenticate());
+billingRouter.use(authenticate(), requireKind('tenant'));
 
 // 1. Branch-scoped bill operations
 billingRouter.post('/branches/:branchId/bills/preview', requireBranchAccess, billingController.previewBill);
@@ -29,7 +30,7 @@ billingRouter.post('/bills/:id/decide', requireRole('owner', 'manager'), billing
 billingRouter.get('/bills/:id', billingController.getBillById);
 billingRouter.post('/bills/:id/cancel', requireRole('owner', 'manager'), validate({ body: cancelBillSchema }), billingController.cancelBill);
 billingRouter.post('/bills/:id/refund', requireRole('owner', 'manager'), validate({ body: refundBillSchema }), billingController.refundBill);
-billingRouter.patch('/bills/:id', requireRole('owner', 'manager'), billingController.editBill);
+billingRouter.patch('/bills/:id', requireRole('owner', 'manager'), validate({ body: editBillSchema }), billingController.editBill);
 
 // 4. Customer Dues
 billingRouter.get('/customers/:id/dues', billingController.getCustomerDues);

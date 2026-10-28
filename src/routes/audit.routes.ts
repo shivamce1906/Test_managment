@@ -5,7 +5,16 @@ import { AuditController } from '../controllers/audit.controller';
 
 export const auditRouter = Router();
 
-auditRouter.use(authenticate(), requireRole('owner', 'super_admin'));
+auditRouter.get(
+  '/audit-logs',
+  authenticate(),
+  requireRole('owner', 'manager', 'super_admin'),
+  AuditController.queryAuditLogs
+);
 
-auditRouter.get('/audit-logs', AuditController.queryAuditLogs);
-auditRouter.get('/audit-logs/export', AuditController.exportAuditLogs);
+auditRouter.get(
+  '/audit-logs/export',
+  authenticate(),
+  requireRole('owner', 'super_admin'),
+  AuditController.exportAuditLogs
+);

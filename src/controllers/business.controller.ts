@@ -85,7 +85,8 @@ export class BusinessController {
 
   public static async updateBranchLoginFlags(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await businessService.updateBranchLoginFlags(req.ctx, req.params.id, req.body.flags);
+      const flags = req.body.flags !== undefined ? req.body.flags : req.body;
+      const result = await businessService.updateBranchLoginFlags(req.ctx, req.params.id, flags);
       res.json(result);
     } catch (err) {
       next(err);

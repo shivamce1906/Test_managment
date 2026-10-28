@@ -20,20 +20,33 @@ import { staffRouter } from './routes/staff.routes';
 import { payrollRouter } from './routes/payroll.routes';
 import { inventoryRouter } from './routes/inventory.routes';
 import { leadRouter } from './routes/lead.routes';
-import { whatsappRouter } from './routes/whatsapp.routes';
+import { whatsappRouter, webhookRouter } from './routes/whatsapp.routes';
 import { dayendRouter } from './routes/dayend.routes';
 import { reportRouter } from './routes/report.routes';
 import { auditRouter } from './routes/audit.routes';
 import { notificationRouter } from './routes/notification.routes';
+import { env } from './config/env';
 
 export function createApp() {
   const app = express();
 
   // Basic security and performance middlewares
   app.use(helmet());
-  app.use(cors({ origin: true, credentials: true }));
+  const allowedOrigins = env.APP_ORIGINS || [];
+  app.use(
+    cors({
+      origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+          callback(null, true);
+        } else {
+          callback(null, false);
+        }
+      },
+      credentials: true,
+    })
+  );
   app.use(compression());
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true }));
 
   // Request ID and contextual child logger
@@ -42,8 +55,11 @@ export function createApp() {
   // Rate Limiting
   app.use(standardRateLimiter);
 
-  // API Routes
+  // Public Routes (no authentication)
   app.use(healthRouter);
+  app.use(webhookRouter);
+
+  // Authenticated API Routes
   app.use('/auth', authRouter);
   app.use('/admin', adminRouter);
   app.use('/business', businessRouter);

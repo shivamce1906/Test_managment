@@ -21,7 +21,7 @@ export function createWhatsAppWorker(): Worker {
       const { messageId } = job.data;
       logger.info({ jobId: job.id, messageId }, 'Processing whatsapp-send job');
 
-      const message = await WaMessage.findById(messageId);
+      const message = await WaMessage.findOne({ _id: messageId }, null, { skipTenantScope: true });
       if (!message) {
         logger.warn({ messageId }, 'WaMessage not found for job');
         return;
@@ -32,7 +32,7 @@ export function createWhatsAppWorker(): Worker {
         return;
       }
 
-      const conversation = await WaConversation.findById(message.conversationId);
+      const conversation = await WaConversation.findOne({ _id: message.conversationId }, null, { skipTenantScope: true });
       if (!conversation) {
         logger.warn({ conversationId: message.conversationId }, 'Conversation not found for message');
         return;
@@ -57,7 +57,7 @@ export function createWhatsAppWorker(): Worker {
       try {
         let templateName: string | undefined;
         if (message.templateId) {
-          const tpl = await WaTemplate.findById(message.templateId);
+          const tpl = await WaTemplate.findOne({ _id: message.templateId }, null, { skipTenantScope: true });
           if (tpl) templateName = tpl.name;
         }
 

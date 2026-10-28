@@ -1,7 +1,20 @@
 import mongoose, { ClientSession } from 'mongoose';
 import { logger } from '../utils/logger';
+import '../models'; // Ensure all model schemas are registered for index syncing
 
 let isConnected = false;
+
+/** Builds every index declared on the Mongoose schemas */
+export async function syncAllIndexes(): Promise<void> {
+  const modelNames = mongoose.modelNames();
+  for (const name of modelNames) {
+    try {
+      await mongoose.model(name).syncIndexes();
+    } catch (err) {
+      logger.warn({ model: name, err }, 'Failed to sync indexes for model');
+    }
+  }
+}
 
 export async function connectDb(uri: string) {
   const mongoUri = uri;
@@ -12,25 +25,14 @@ export async function connectDb(uri: string) {
 
   try {
     await mongoose.connect(mongoUri, {
-      autoIndex: false,
+      autoIndex: true,
       serverSelectionTimeoutMS: 30000,
     });
-    logger.info('MongoDB connected successfully (Normal Standalone Mode)');
+    logger.info('MongoDB connected successfully');
     isConnected = true;
 
-    /*
-    // =========================================================================
-    // REPLICA SET TOPOLOGY CHECK (Uncomment when deploying to a Replica Set cluster)
-    // =========================================================================
-    // const adminDb = mongoose.connection.db?.admin();
-    // if (adminDb) {
-    //   const hello = await adminDb.command({ hello: 1 });
-    //   if (hello.setName || hello.hosts) {
-    //     logger.info({ replicaSet: hello.setName }, '✅ MongoDB Replica Set active with transaction support');
-    //   }
-    // }
-    // =========================================================================
-    */
+    // Sync all declared unique and composite indexes on startup
+    await syncAllIndexes();
 
     return mongoose.connection;
   } catch (error) {
@@ -48,9 +50,7 @@ export async function disconnectDb(): Promise<void> {
 }
 
 /**
- * Executes a MongoDB database operation.
- * Active Mode: Normal standalone MongoDB (runs smoothly without replica set requirement).
- * Replica Mode: Multi-document ACID transactions preserved below (uncomment for replica clusters/Atlas).
+ * Executes a MongoDB database operation inside a multi-document ACID transaction.
  */
 export async function withTransaction<T>(
   fn: (session: ClientSession) => Promise<T>,
@@ -63,29 +63,18 @@ export async function withTransaction<T>(
   const session = await mongoose.startSession();
 
   try {
-    /*
-    // =========================================================================
-    // REPLICA SET TRANSACTION CODE (PRESERVED)
-    // Uncomment this block when deploying to a MongoDB Replica Set or MongoDB Atlas:
-    // =========================================================================
-    // let result!: T;
-    // await session.withTransaction(
-    //   async () => {
-    //     result = await fn(session);
-    //   },
-    //   {
-    //     readPreference: 'primary',
-    //     readConcern: { level: 'majority' },
-    //     writeConcern: { w: 'majority' },
-    //   }
-    // );
-    // return result;
-    // =========================================================================
-    */
-
-    // NORMAL STANDALONE MONGODB EXECUTION
-    // Runs cleanly and smoothly on any standard single-node or local MongoDB installation:
-    return await fn(session);
+    let result!: T;
+    await session.withTransaction(
+      async () => {
+        result = await fn(session);
+      },
+      {
+        readPreference: 'primary',
+        readConcern: { level: 'majority' },
+        writeConcern: { w: 'majority' },
+      }
+    );
+    return result;
   } finally {
     await session.endSession();
   }

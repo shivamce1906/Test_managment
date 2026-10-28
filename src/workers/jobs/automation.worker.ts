@@ -4,6 +4,7 @@ import {
   Business,
   Appointment,
   Customer,
+  Automation,
   AutomationSend,
   WaConversation,
   WaMessage,
@@ -30,9 +31,10 @@ export function createAutomationWorker(): Worker {
       if (!waNumber) return;
 
       const now = new Date();
-      const currentHour = now.getHours();
-      // Quiet hours check for marketing (allowed 09:00 - 21:00)
-      const isQuietHours = currentHour < 9 || currentHour >= 21;
+      // Quiet hours check for marketing (allowed 09:00 - 21:00 IST)
+      const istTime = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+      const istHour = istTime.getUTCHours();
+      const isQuietHours = istHour < 9 || istHour >= 21;
 
       // 1. 24h & 2h Appointment Reminders
       const target24hStart = new Date(now.getTime() + 23.5 * 60 * 60 * 1000);
@@ -50,15 +52,21 @@ export function createAutomationWorker(): Worker {
       });
 
       for (const appt of upcomingAppts) {
-        const cust = await Customer.findById(appt.customerId);
-        if (!cust || !cust.phone || cust.doNotMessage) continue;
-
         const is24h = appt.start >= target24hStart && appt.start <= target24hEnd;
         const type = is24h ? 'reminder_24h' : 'reminder_2h';
+
+        const autoConfig = await Automation.findOne({ businessId: bId, key: type });
+        if (!autoConfig || !autoConfig.enabled) {
+          continue;
+        }
+
+        const cust = await Customer.findOne({ _id: appt.customerId, businessId: bId });
+        if (!cust || !cust.phone || cust.doNotMessage) continue;
+
         const dedupeId = `${type}:${appt._id}:${appt.businessDate}`;
 
         // Check dedupe
-        const existing = await AutomationSend.findById(dedupeId);
+        const existing = await AutomationSend.findOne({ _id: dedupeId });
         if (existing) continue;
 
         // Ensure conversation exists
@@ -107,21 +115,24 @@ export function createAutomationWorker(): Worker {
 
       // 2. Birthday wishes (Only outside quiet hours)
       if (!isQuietHours) {
-        const todayMonth = String(now.getMonth() + 1).padStart(2, '0');
-        const todayDay = String(now.getDate()).padStart(2, '0');
-        const birthdayPattern = `-${todayMonth}-${todayDay}`;
-        const dateStr = `${now.getFullYear()}-${todayMonth}-${todayDay}`;
+        const autoBirthday = await Automation.findOne({ businessId: bId, key: 'birthday' });
+        if (autoBirthday && autoBirthday.enabled) {
+          const todayMonth = String(istTime.getUTCMonth() + 1).padStart(2, '0');
+          const todayDay = String(istTime.getUTCDate()).padStart(2, '0');
+          const birthdayPattern = `-${todayMonth}-${todayDay}`;
+          const dateStr = `${istTime.getUTCFullYear()}-${todayMonth}-${todayDay}`;
 
-        const birthdayCustomers = await Customer.find({
-          businessId: bId,
-          doNotMessage: { $ne: true },
-          dob: { $regex: `${birthdayPattern}$` },
-        }).limit(200);
+          const birthdayCustomers = await Customer.find({
+            businessId: bId,
+            doNotMessage: { $ne: true },
+            waOptIn: true,
+            dob: { $regex: `${birthdayPattern}$` },
+          }).limit(200);
 
-        for (const cust of birthdayCustomers) {
-          const dedupeId = `birthday:${cust._id}:${dateStr}`;
-          const existing = await AutomationSend.findById(dedupeId);
-          if (existing) continue;
+          for (const cust of birthdayCustomers) {
+            const dedupeId = `birthday:${cust._id}:${dateStr}`;
+            const existing = await AutomationSend.findOne({ _id: dedupeId });
+            if (existing) continue;
 
           let conversation = await WaConversation.findOne({
             businessId: bId,
@@ -159,11 +170,12 @@ export function createAutomationWorker(): Worker {
             at: new Date(),
           });
 
-          await whatsappSendQueue().add(
-            'send',
-            { messageId: msg._id.toString() },
-            { jobId: msg._id.toString() }
-          );
+            await whatsappSendQueue().add(
+              'send',
+              { messageId: msg._id.toString() },
+              { jobId: msg._id.toString() }
+            );
+          }
         }
       }
     },

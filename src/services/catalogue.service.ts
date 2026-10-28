@@ -314,7 +314,12 @@ export class CatalogueService {
 
   async deleteCategory(ctx: RequestContext, id: string): Promise<void> {
     const businessId = toObjectId(ctx.businessId!);
-    await Category.updateOne({ _id: toObjectId(id), businessId }, { $set: { active: false } });
+    const categoryId = toObjectId(id);
+    const hasActiveServices = await Service.exists({ businessId, categoryId, active: true });
+    if (hasActiveServices) {
+      throw new AppError(409, 'CONFLICT', 'Cannot delete category that contains active services');
+    }
+    await Category.updateOne({ _id: categoryId, businessId }, { $set: { active: false } });
   }
 
   async deleteService(ctx: RequestContext, id: string): Promise<void> {
@@ -323,11 +328,21 @@ export class CatalogueService {
   }
 
   async setBranchPrice(ctx: RequestContext, serviceId: string, branchId: string, pricePaise: number): Promise<IService> {
+    if (pricePaise < 0) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'Branch price must be a non-negative integer');
+    }
+    if (ctx.role === 'manager') {
+      const isAssigned = (ctx.branchIds || []).some((b: string) => b.toString() === branchId.toString());
+      if (!isAssigned) {
+        throw new AppError(403, 'FORBIDDEN', 'Cannot set branch price for an unassigned branch');
+      }
+    }
     const businessId = toObjectId(ctx.businessId!);
     const service = await Service.findOne({ _id: toObjectId(serviceId), businessId });
     if (!service) {
       throw new AppError(404, 'NOT_FOUND', 'Service not found');
     }
+    const before = service.toObject();
     const idx = service.branchPrices.findIndex((bp) => bp.branchId.toString() === branchId);
     if (idx >= 0) {
       service.branchPrices[idx].pricePaise = pricePaise;
@@ -339,6 +354,17 @@ export class CatalogueService {
       });
     }
     await service.save();
+
+    await auditService.logAction({
+      ctx,
+      action: 'service.set_branch_price',
+      entity: 'service',
+      entityId: service._id,
+      branchId: toObjectId(branchId),
+      before,
+      after: { pricePaise, branchId },
+    });
+
     return service;
   }
 

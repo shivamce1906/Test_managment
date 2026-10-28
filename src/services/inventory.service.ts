@@ -7,6 +7,7 @@ import {
   Transfer,
   StockAudit,
   Branch,
+  Vendor,
   Counter,
   withTransaction,
 } from '../models';
@@ -43,7 +44,7 @@ export async function getStockBalances(
   if (filter?.pool) query.pool = filter.pool;
   if (filter?.productId) query.productId = toObjectId(filter.productId);
 
-  return StockBalance.find(query).populate('productId');
+  return StockBalance.find(query).populate({ path: 'productId', options: { skipTenantScope: true } });
 }
 
 export async function getStockMovements(
@@ -70,7 +71,7 @@ export async function getStockMovements(
   if (filter?.businessDate) query.businessDate = filter.businessDate;
 
   return StockMovement.find(query)
-    .populate('productId')
+    .populate({ path: 'productId', options: { skipTenantScope: true } })
     .sort({ createdAt: -1 })
     .skip(filter?.skip || 0)
     .limit(filter?.limit || 50);
@@ -90,6 +91,13 @@ export async function adjustStock(
   const product = await Product.findOne({ _id: toObjectId(input.productId), businessId });
   if (!product) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Product not found');
+  }
+
+  if (product.type === 'retail' && input.pool === 'consumable') {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Retail-only products cannot be stocked or adjusted in the consumable pool');
+  }
+  if (product.type === 'consumable' && input.pool === 'retail') {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Consumable-only products cannot be stocked or adjusted in the retail pool');
   }
 
   return withTransaction(async (session) => {
@@ -155,9 +163,27 @@ export async function createPurchaseOrder(
   const businessId = toObjectId(ctx.businessId);
   const userId = toObjectId(ctx.userId);
 
+  if (ctx.role === 'manager') {
+    const manages = (ctx.branchIds || []).includes(input.branchId.toString());
+    if (!manages) {
+      throw new AppError(403, ErrorCode.FORBIDDEN, 'Manager does not have access to this branch');
+    }
+  }
+
   const branch = await Branch.findOne({ _id: toObjectId(input.branchId), businessId });
   if (!branch) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Branch not found');
+  }
+
+  const vendor = await Vendor.findOne({ _id: toObjectId(input.vendorId), businessId });
+  if (!vendor) {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Vendor not found or does not belong to this business');
+  }
+
+  const productIds = input.items.map((it) => toObjectId(it.productId));
+  const products = await Product.find({ _id: { $in: productIds }, businessId });
+  if (products.length !== productIds.length) {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'One or more products do not belong to this business');
   }
 
   return withTransaction(async (session) => {
@@ -329,6 +355,10 @@ export async function receivePurchaseOrder(
         throw new AppError(400, ErrorCode.BAD_REQUEST, `Product ${receiptItem.productId} not found in this PO`);
       }
 
+      if (item.receivedPurchaseUnits + receiptItem.qty > item.qtyPurchaseUnits) {
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Cannot receive more than ordered');
+      }
+
       item.receivedPurchaseUnits += receiptItem.qty;
 
       const product = await Product.findOne({ _id: toObjectId(receiptItem.productId), businessId }).session(session);
@@ -359,7 +389,7 @@ export async function receivePurchaseOrder(
             pool: targetPool,
             type: 'purchase',
             qty: useUnitsQty,
-            costPaise: item.ratePaise / unitsPerPurchase,
+            costPaise: Math.round(receiptItem.qty * item.ratePaise),
             refType: 'purchaseOrder',
             refId: po._id,
             batch: receiptItem.batch,
@@ -454,7 +484,7 @@ export async function getPurchaseOrders(
   if (status) query.status = status;
 
   return PurchaseOrder.find(query)
-    .populate('vendorId', 'name contactPerson phone')
+    .populate({ path: 'vendorId', select: 'name contactPerson phone', options: { skipTenantScope: true } })
     .sort({ createdAt: -1 });
 }
 
@@ -471,6 +501,12 @@ export async function createTransfer(
   }
   const businessId = toObjectId(ctx.businessId);
   const userId = toObjectId(ctx.userId);
+
+  const fromBranch = await Branch.findOne({ _id: toObjectId(input.fromBranchId), businessId });
+  const toBranch = await Branch.findOne({ _id: toObjectId(input.toBranchId), businessId });
+  if (!fromBranch || !toBranch) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'From or To branch not found or does not belong to this business');
+  }
 
   return withTransaction(async (session) => {
     const counter = await Counter.findOneAndUpdate(
@@ -540,6 +576,13 @@ export async function approveTransfer(
 
   if (transfer.status !== 'requested') {
     throw new AppError(400, ErrorCode.BAD_REQUEST, `Cannot approve transfer in ${transfer.status} status`);
+  }
+
+  if (ctx.role === 'manager') {
+    const managesFrom = (ctx.branchIds || []).includes(transfer.fromBranchId.toString());
+    if (!managesFrom) {
+      throw new AppError(403, ErrorCode.FORBIDDEN, 'Only managers of the sending branch can approve transfers');
+    }
   }
 
   transfer.status = 'approved';
@@ -678,6 +721,13 @@ export async function receiveTransfer(
         throw new AppError(400, ErrorCode.BAD_REQUEST, `Product ${recItem.productId} not found in this transfer`);
       }
 
+      if (recItem.receivedQty > item.qty) {
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Cannot receive more than dispatched quantity');
+      }
+      if (recItem.receivedQty < item.qty && !recItem.mismatchReason) {
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Mismatch reason is required when received quantity is less than dispatched');
+      }
+
       item.receivedQty = recItem.receivedQty;
       if (recItem.mismatchReason) {
         item.mismatchReason = recItem.mismatchReason;
@@ -758,8 +808,8 @@ export async function getTransfers(
   if (filter?.status) query.status = filter.status;
 
   return Transfer.find(query)
-    .populate('fromBranchId', 'name code')
-    .populate('toBranchId', 'name code')
+    .populate({ path: 'fromBranchId', select: 'name code', options: { skipTenantScope: true } })
+    .populate({ path: 'toBranchId', select: 'name code', options: { skipTenantScope: true } })
     .sort({ createdAt: -1 });
 }
 
@@ -876,6 +926,10 @@ export async function approveStockAudit(
     const audit = await StockAudit.findOne({ _id: toObjectId(auditId), businessId }).session(session);
     if (!audit) {
       throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Stock audit not found');
+    }
+
+    if (audit.status === 'approved') {
+      return audit;
     }
 
     if (audit.status !== 'submitted') {

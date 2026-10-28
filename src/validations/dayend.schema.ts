@@ -26,16 +26,39 @@ export const createPettyCashSchema = z.object({
   amountPaise: z.number().int().positive(),
 });
 
-export const submitDayClosureSchema = z.object({
-  denominations: z.record(z.number().int().nonnegative()),
-  cashPaise: z.number().int().nonnegative(),
-  upiPaise: z.number().int().nonnegative(),
-  cardPaise: z.number().int().nonnegative(),
-  diffReason: z.string().optional(),
-});
+export const submitDayClosureSchema = z
+  .object({
+    denominations: z.record(z.number().int().nonnegative()),
+    cashPaise: z.number().int().nonnegative(),
+    upiPaise: z.number().int().nonnegative(),
+    cardPaise: z.number().int().nonnegative(),
+    diffReason: z.string().optional(),
+  })
+  .refine(
+    (data) => {
+      if (!data.denominations) return true;
+      let sumPaise = 0;
+      for (const [denomStr, count] of Object.entries(data.denominations)) {
+        const denom = parseInt(denomStr, 10);
+        if (!isNaN(denom) && typeof count === 'number') {
+          sumPaise += denom * 100 * count;
+        }
+      }
+      return sumPaise === data.cashPaise;
+    },
+    {
+      message: 'Denominations must add up to the counted cash',
+      path: ['denominations'],
+    }
+  );
 
 export const approveDayClosureSchema = z.object({});
 
 export const reopenDayClosureSchema = z.object({
   reason: z.string().min(1, 'Reason is mandatory for reopening a closed day'),
+});
+
+export const dayClosureParamsSchema = z.object({
+  branchId: objectIdSchema,
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be in YYYY-MM-DD format'),
 });

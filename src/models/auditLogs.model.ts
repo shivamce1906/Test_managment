@@ -51,4 +51,22 @@ const auditLogSchema = new Schema<IAuditLog>(
 auditLogSchema.index({ businessId: 1, at: -1 });
 auditLogSchema.index({ businessId: 1, entity: 1, entityId: 1 });
 
+const preventMutation = function (this: any, next: (err?: any) => void) {
+  next(new Error('Audit logs are append-only and cannot be updated or deleted'));
+};
+
+auditLogSchema.pre('updateOne', preventMutation);
+auditLogSchema.pre('updateMany', preventMutation);
+auditLogSchema.pre('deleteOne', preventMutation);
+auditLogSchema.pre('deleteMany', preventMutation);
+auditLogSchema.pre('findOneAndUpdate', preventMutation);
+auditLogSchema.pre('findOneAndDelete', preventMutation);
+auditLogSchema.pre('findOneAndReplace', preventMutation);
+auditLogSchema.pre('save', function (this: any, next) {
+  if (!this.isNew) {
+    return next(new Error('Audit logs are append-only and cannot be updated'));
+  }
+  next();
+});
+
 export const AuditLog = model<IAuditLog>('auditLogs', auditLogSchema);

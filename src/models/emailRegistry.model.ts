@@ -4,7 +4,8 @@ export interface IEmailRegistry extends Document<string> {
   _id: string; // Lowercased normalized email
   kind: 'platform' | 'tenant';
   businessId?: Types.ObjectId;
-  userId: Types.ObjectId;
+  userId?: Types.ObjectId;
+  accountId?: Types.ObjectId;
 }
 
 const emailRegistrySchema = new Schema<IEmailRegistry>(
@@ -12,7 +13,8 @@ const emailRegistrySchema = new Schema<IEmailRegistry>(
     _id: { type: String, required: true },
     kind: { type: String, enum: ['platform', 'tenant'], required: true },
     businessId: { type: Schema.Types.ObjectId, ref: 'businesses' },
-    userId: { type: Schema.Types.ObjectId, required: true },
+    userId: { type: Schema.Types.ObjectId },
+    accountId: { type: Schema.Types.ObjectId },
   },
   {
     collection: 'emailRegistry',
@@ -21,4 +23,14 @@ const emailRegistrySchema = new Schema<IEmailRegistry>(
   }
 );
 
+emailRegistrySchema.pre('validate', function () {
+  if (this.accountId && !this.userId) {
+    this.userId = this.accountId;
+  }
+  if (this.userId && !this.accountId) {
+    this.accountId = this.userId;
+  }
+});
+
 export const EmailRegistry = model<IEmailRegistry>('emailRegistry', emailRegistrySchema);
+

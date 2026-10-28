@@ -1,6 +1,6 @@
 import { Types } from 'mongoose';
-import { Staff, Roster, Attendance, Leave, Advance, Expense, withTransaction } from '../models';
-import { AppError, ErrorCode, getBusinessDate, normalizePhone } from '../utils';
+import { Staff, Roster, Attendance, Leave, Advance, Expense, Branch, withTransaction } from '../models';
+import { AppError, ErrorCode, getBusinessDate, normalizePhone, getIstDayOfWeek, parseIstDateTime } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
 import { z } from 'zod';
@@ -20,6 +20,18 @@ export async function createStaff(
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
+  }
+
+  const branch = await Branch.findOne({
+    _id: toObjectId(input.branchId),
+    businessId: toObjectId(ctx.businessId),
+  });
+  if (!branch) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Branch not found');
+  }
+
+  if (ctx.role === 'manager' && !ctx.branchIds.includes(input.branchId.toString())) {
+    throw new AppError(403, ErrorCode.FORBIDDEN, 'Forbidden: manager does not have access to this branch');
   }
 
   const phone = normalizePhone(input.phone);
@@ -161,6 +173,7 @@ export async function getBilledByStaff(
   return Staff.find({
     businessId: toObjectId(ctx.businessId),
     branchId: toObjectId(branchId),
+    designation: 'receptionist',
     status: 'active',
   }).select('_id name designation phone');
 }
@@ -315,6 +328,14 @@ export async function markAttendance(
   const results = [];
 
   for (const entry of input.entries) {
+    const staff = await Staff.findOne({
+      _id: toObjectId(entry.staffId),
+      businessId: toObjectId(ctx.businessId),
+    });
+    if (!staff || staff.branchId.toString() !== branchId.toString()) {
+      throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff not found in this branch');
+    }
+
     let record = await Attendance.findOne({
       businessId: toObjectId(ctx.businessId),
       staffId: toObjectId(entry.staffId),
@@ -325,12 +346,38 @@ export async function markAttendance(
     const inAt = entry.inAt ? new Date(entry.inAt) : undefined;
     const outAt = entry.outAt ? new Date(entry.outAt) : undefined;
 
+    let shiftMinutes = 9 * 60;
+    const roster = await Roster.findOne({
+      businessId: toObjectId(ctx.businessId),
+      staffId: toObjectId(entry.staffId),
+    });
+
+    if (roster) {
+      const override = roster.overrides?.find((o) => o.date === businessDate);
+      if (override) {
+        if (!override.off && override.start && override.end) {
+          const [sh, sm] = override.start.split(':').map(Number);
+          const [eh, em] = override.end.split(':').map(Number);
+          shiftMinutes = (eh * 60 + em) - (sh * 60 + sm);
+        }
+      } else {
+        const istDate = parseIstDateTime(businessDate, '12:00');
+        const dow = getIstDayOfWeek(istDate);
+        const daySchedule = roster.weekly?.find((w) => w.day === dow);
+        if (daySchedule && !daySchedule.off && daySchedule.start && daySchedule.end) {
+          const [sh, sm] = daySchedule.start.split(':').map(Number);
+          const [eh, em] = daySchedule.end.split(':').map(Number);
+          shiftMinutes = (eh * 60 + em) - (sh * 60 + sm);
+        }
+      }
+    }
+
     let overtimeMin = 0;
     if (inAt && outAt) {
       const diffMs = outAt.getTime() - inAt.getTime();
-      const hoursWorked = diffMs / (1000 * 60 * 60);
-      if (hoursWorked > 9) {
-        overtimeMin = Math.round((hoursWorked - 9) * 60);
+      const minutesWorked = Math.round(diffMs / (1000 * 60));
+      if (minutesWorked > shiftMinutes) {
+        overtimeMin = minutesWorked - shiftMinutes;
       }
     }
 
@@ -372,7 +419,7 @@ export async function markAttendance(
       record.status = status;
       if (inAt) record.inAt = inAt;
       if (outAt) record.outAt = outAt;
-      if (overtimeMin > 0) record.overtimeMin = overtimeMin;
+      record.overtimeMin = overtimeMin;
       if (entry.note !== undefined) record.note = entry.note;
       (record as any).updatedBy = toObjectId(ctx.userId);
       await record.save();

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authenticate } from '../middlewares/auth.middleware';
-import { requireRole } from '../middlewares/role.middleware';
+import { requireRole, requireKind } from '../middlewares/role.middleware';
 import { requireBranchAccess } from '../middlewares/branch.middleware';
 import { requirePermission } from '../middlewares/permission.middleware';
 import { validate } from '../middlewares/validate.middleware';
@@ -15,23 +15,24 @@ import {
   createTransferSchema,
   receiveTransferSchema,
   createStockAuditSchema,
+  updateStockAuditCountsSchema,
   adjustStockSchema,
 } from '../validations';
 import { inventoryController } from '../controllers/inventory.controller';
 
 export const inventoryRouter = Router();
 
-inventoryRouter.use(authenticate());
+inventoryRouter.use(['/products', '/vendors', '/branches', '/purchase-orders', '/transfers', '/stock-audits'], authenticate(), requireKind('tenant'));
 
-// 1. Products Master
-inventoryRouter.post('/products', requireRole('owner', 'manager'), validate({ body: createProductSchema }), inventoryController.createProduct);
+// 1. Products Master (PRD §3: Owner only)
+inventoryRouter.post('/products', requireRole('owner'), validate({ body: createProductSchema }), inventoryController.createProduct);
 inventoryRouter.get('/products', inventoryController.getProducts);
-inventoryRouter.patch('/products/:id', requireRole('owner', 'manager'), validate({ body: updateProductSchema }), inventoryController.updateProduct);
+inventoryRouter.patch('/products/:id', requireRole('owner'), validate({ body: updateProductSchema }), inventoryController.updateProduct);
 
-// 2. Vendors Master
-inventoryRouter.post('/vendors', requireRole('owner', 'manager'), validate({ body: createVendorSchema }), inventoryController.createVendor);
+// 2. Vendors Master (PRD §3: Owner only)
+inventoryRouter.post('/vendors', requireRole('owner'), validate({ body: createVendorSchema }), inventoryController.createVendor);
 inventoryRouter.get('/vendors', inventoryController.getVendors);
-inventoryRouter.patch('/vendors/:id', requireRole('owner', 'manager'), validate({ body: updateVendorSchema }), inventoryController.updateVendor);
+inventoryRouter.patch('/vendors/:id', requireRole('owner'), validate({ body: updateVendorSchema }), inventoryController.updateVendor);
 
 // 3. Branch Stock & Movements
 inventoryRouter.get('/branches/:branchId/stock', requireBranchAccess, inventoryController.getStock);
@@ -55,5 +56,5 @@ inventoryRouter.post('/transfers/:id/receive', requireRole('owner', 'manager'), 
 // 6. Physical Stock Audits
 inventoryRouter.post('/branches/:branchId/stock-audits', requireBranchAccess, requireRole('owner', 'manager'), validate({ body: createStockAuditSchema }), inventoryController.createStockAudit);
 inventoryRouter.get('/branches/:branchId/stock-audits', requireBranchAccess, inventoryController.getStockAudits);
-inventoryRouter.patch('/stock-audits/:id/counts', requireRole('owner', 'manager'), inventoryController.updateStockAuditCounts);
-inventoryRouter.post('/stock-audits/:id/approve', requireRole('owner'), inventoryController.approveStockAudit);
+inventoryRouter.patch('/stock-audits/:id/counts', requireRole('owner', 'manager'), validate({ body: updateStockAuditCountsSchema }), inventoryController.updateStockAuditCounts);
+inventoryRouter.post('/stock-audits/:id/approve', requireRole('owner', 'manager'), inventoryController.approveStockAudit);

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { logger } from '../../utils';
 
 export interface SendMessageOptions {
@@ -37,9 +38,25 @@ export class AiSensyAdapter {
   /**
    * Verifies incoming webhook signature.
    */
-  verifyWebhookSignature(secret: string, signature?: string): boolean {
-    if (!signature || !secret) return true; // mock acceptance
-    return true;
+  verifyWebhookSignature(secret: string, signature?: string, payload?: any): boolean {
+    if (!signature) return true;
+    if (!secret) return true;
+    if (signature === secret) return true;
+    try {
+      const hmac = crypto.createHmac('sha256', secret);
+      const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      const digest = hmac.update(data).digest('hex');
+      if (signature === digest) return true;
+      if (
+        Buffer.from(signature).length === Buffer.from(digest).length &&
+        crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest))
+      ) {
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+    return false;
   }
 
   /**

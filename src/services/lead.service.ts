@@ -1,6 +1,6 @@
 import { Types } from 'mongoose';
 import { Lead, Customer } from '../models';
-import { AppError, ErrorCode, normalizePhone } from '../utils';
+import { AppError, ErrorCode, normalizePhone, maskPhone } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
 import { z } from 'zod';
@@ -12,6 +12,10 @@ export async function createLead(
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
+  }
+
+  if (ctx.branchId && String(ctx.branchId) !== String(input.branchId)) {
+    throw new AppError(403, ErrorCode.FORBIDDEN, 'Branch login cannot add a lead to another branch');
   }
 
   const phone = normalizePhone(input.phone);
@@ -60,6 +64,13 @@ export async function updateLead(
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Lead not found');
   }
 
+  if (input.stage === 'lost') {
+    const reason = input.lostReason || lead.lostReason;
+    if (!reason || !reason.trim()) {
+      throw new AppError(400, ErrorCode.VALIDATION_ERROR, 'lostReason is required when stage is lost');
+    }
+  }
+
   const before = lead.toObject();
 
   if (input.branchId) lead.branchId = toObjectId(input.branchId);
@@ -105,12 +116,24 @@ export async function getLeads(
   }
 
   const query: any = { businessId: toObjectId(ctx.businessId) };
-  if (filter?.branchId) query.branchId = toObjectId(filter.branchId);
+  if (ctx.branchId) {
+    query.branchId = toObjectId(ctx.branchId);
+  } else if (filter?.branchId) {
+    query.branchId = toObjectId(filter.branchId);
+  }
   if (filter?.stage) query.stage = filter.stage;
   if (filter?.assignedTo) query.assignedTo = toObjectId(filter.assignedTo);
   if (filter?.followUpDate) query.followUpDate = filter.followUpDate;
 
-  return Lead.find(query).populate('serviceIds', 'name').sort({ createdAt: -1 });
+  const leads = await Lead.find(query).populate('serviceIds', 'name').sort({ createdAt: -1 });
+  if (ctx.role === 'branch') {
+    return leads.map((l) => {
+      const obj = l.toObject();
+      obj.phone = maskPhone(obj.phone);
+      return obj;
+    });
+  }
+  return leads;
 }
 
 export async function getLeadById(
@@ -142,6 +165,10 @@ export async function convertLead(
   const lead = await Lead.findOne({ _id: toObjectId(leadId), businessId: toObjectId(ctx.businessId) });
   if (!lead) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Lead not found');
+  }
+
+  if (lead.stage === 'lost') {
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, 'A lost lead cannot be converted');
   }
 
   if (lead.customerId) {

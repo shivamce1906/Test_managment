@@ -10,6 +10,7 @@ export const configureWaNumberSchema = z.object({
 });
 
 export const sendWaMessageSchema = z.object({
+  conversationId: objectIdSchema.optional(),
   text: z.string().min(1).optional(),
   templateId: objectIdSchema.optional(),
   variables: z.array(z.string()).optional(),

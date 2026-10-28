@@ -58,13 +58,36 @@ export class NotificationController {
   public static async presignUpload(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { filename, contentType } = req.body;
+      const ALLOWED_UPLOAD_TYPES = new Set([
+        'image/jpeg',
+        'image/png',
+        'image/webp',
+        'image/gif',
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-excel',
+        'text/csv',
+        'text/plain',
+      ]);
+
+      if (!contentType || !ALLOWED_UPLOAD_TYPES.has(contentType)) {
+        res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Disallowed or invalid contentType for upload',
+          },
+        });
+        return;
+      }
+
       const extension = filename ? filename.split('.').pop() : 'bin';
       const key = `uploads/${req.ctx.businessId || 'platform'}/${Date.now()}-${randomUUID()}.${extension}`;
-      const presignedUrl = await s3Adapter.getPresignedPutUrl(key, contentType || 'application/octet-stream');
+      const { url } = await s3Adapter.getPresignedUploadUrl(key, contentType);
 
       res.json({
         key,
-        uploadUrl: presignedUrl,
+        url,
+        uploadUrl: url,
       });
     } catch (err) {
       next(err);

@@ -190,12 +190,13 @@ export class CustomerService {
     const businessId = toObjectId(ctx.businessId!);
     const query: any = { businessId, mergedInto: { $exists: false } };
 
-    if (filters.q) {
-      const normalized = filters.q.replace(/\D/g, '');
+    const qStr = typeof filters.q === 'string' ? filters.q.trim() : '';
+    if (qStr) {
+      const normalized = qStr.replace(/\D/g, '');
       if (normalized.length >= 4) {
         query.phone = { $regex: normalized };
       } else {
-        query.name = { $regex: filters.q, $options: 'i' };
+        query.name = { $regex: qStr, $options: 'i' };
       }
     }
 

@@ -9,6 +9,11 @@ import {
   Feedback,
   Customer,
   Bill,
+  Business,
+  Branch,
+  Lead,
+  User,
+  Notification,
   withTransaction,
 } from '../models';
 import { AppError, ErrorCode, normalizePhone, encrypt, decrypt } from '../utils';
@@ -171,15 +176,29 @@ export async function getConversations(
   }
 
   const query: any = { businessId: ctx.businessId };
-  if (branchId) query.branchId = branchId;
+  if (ctx.role === 'manager') {
+    if (branchId) {
+      if (!ctx.branchIds?.map(String).includes(String(branchId))) {
+        throw new AppError(403, ErrorCode.FORBIDDEN, 'Access denied to branch');
+      }
+      query.branchId = branchId;
+    } else {
+      query.branchId = { $in: ctx.branchIds || [] };
+    }
+  } else if (ctx.branchId) {
+    query.branchId = ctx.branchId;
+  } else if (branchId) {
+    query.branchId = branchId;
+  }
+
   if (filter?.unreadOnly) query.unread = { $gt: 0 };
   if (filter?.search) {
     query.phone = { $regex: filter.search, $options: 'i' };
   }
 
   return WaConversation.find(query)
-    .populate('customerId', 'name phone')
-    .populate('leadId', 'name phone stage')
+    .populate({ path: 'customerId', select: 'name phone', options: { skipTenantScope: true } })
+    .populate({ path: 'leadId', select: 'name phone stage', options: { skipTenantScope: true } })
     .sort({ lastMessageAt: -1 });
 }
 
@@ -192,8 +211,8 @@ export async function getConversationById(
   }
 
   const conv = await WaConversation.findOne({ _id: conversationId, businessId: ctx.businessId })
-    .populate('customerId')
-    .populate('leadId');
+    .populate({ path: 'customerId', options: { skipTenantScope: true } })
+    .populate({ path: 'leadId', options: { skipTenantScope: true } });
 
   if (!conv) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Conversation not found');
@@ -247,8 +266,8 @@ export async function sendMessage(
     const windowElapsedMs = Date.now() - lastInbound;
     if (windowElapsedMs > 24 * 60 * 60 * 1000) {
       throw new AppError(
-        400,
-        ErrorCode.WA_WINDOW_CLOSED,
+        422,
+        ErrorCode.WINDOW_CLOSED,
         'Cannot send free-form message outside 24-hour customer response window. Use an approved template.'
       );
     }
@@ -266,6 +285,9 @@ export async function sendMessage(
     const tmpl = await WaTemplate.findOne({ _id: input.templateId, businessId: ctx.businessId });
     if (!tmpl) {
       throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Template not found');
+    }
+    if (tmpl.status !== 'approved') {
+      throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Template is not approved');
     }
     templateName = tmpl.name;
   }
@@ -317,10 +339,43 @@ export async function processInboundWebhook(
     status?: string;
   }
 ) {
-  const waNum = await WaNumber.findById(numberId);
+  const waNum = await WaNumber.findOne({ _id: numberId }, null, { skipTenantScope: true });
   if (!waNum) return;
 
+  if (payload.status && payload.providerMessageId) {
+    await WaMessage.updateOne(
+      { businessId: waNum.businessId, providerMessageId: payload.providerMessageId },
+      { $set: { status: payload.status } }
+    );
+    if (!payload.text) return;
+  }
+
+  if (payload.providerMessageId) {
+    const existing = await WaMessage.findOne({
+      businessId: waNum.businessId,
+      providerMessageId: payload.providerMessageId,
+    });
+    if (existing) return;
+  }
+
   const phone = normalizePhone(payload.from);
+
+  if (payload.text && payload.text.trim().toUpperCase() === 'STOP') {
+    await Customer.updateMany(
+      { businessId: waNum.businessId, phone },
+      { $set: { waOptIn: false, doNotMessage: true } }
+    );
+  }
+
+  const business = await Business.findById(waNum.businessId);
+  let branchId = business?.headBranchId;
+  if (!branchId && waNum.branchIds && waNum.branchIds.length > 0) {
+    branchId = waNum.branchIds[0];
+  }
+  if (!branchId) {
+    const branch = await Branch.findOne({ businessId: waNum.businessId });
+    branchId = branch?._id;
+  }
 
   let conv = await WaConversation.findOne({
     businessId: waNum.businessId,
@@ -328,10 +383,9 @@ export async function processInboundWebhook(
     phone,
   });
 
-  if (!conv) {
-    const customer = await Customer.findOne({ businessId: waNum.businessId, phone });
-    const branchId = waNum.branchIds.length > 0 ? waNum.branchIds[0] : new Types.ObjectId();
+  const customer = await Customer.findOne({ businessId: waNum.businessId, phone });
 
+  if (!conv) {
     conv = await WaConversation.create({
       businessId: waNum.businessId,
       numberId: waNum._id,
@@ -342,10 +396,28 @@ export async function processInboundWebhook(
       lastInboundAt: new Date(),
       unread: 1,
     });
+
+    if (!customer) {
+      const existingLead = await Lead.findOne({ businessId: waNum.businessId, phone });
+      if (!existingLead) {
+        await Lead.create({
+          businessId: waNum.businessId,
+          branchId,
+          name: phone,
+          phone,
+          source: 'whatsapp',
+          stage: 'new',
+          notes: payload.text || 'WhatsApp inbound message',
+        });
+      }
+    }
   } else {
     conv.lastMessageAt = new Date();
     conv.lastInboundAt = new Date();
     conv.unread += 1;
+    if (!conv.customerId && customer) {
+      conv.customerId = customer._id;
+    }
     await conv.save();
   }
 
@@ -390,6 +462,19 @@ export async function processInboundWebhook(
             comment: payload.text,
             reviewLinkSent: isHighRating,
           });
+
+          if (ratingNum <= 3) {
+            const owner = await User.findOne({ businessId: waNum.businessId, role: 'owner' });
+            if (owner) {
+              await Notification.create({
+                businessId: waNum.businessId,
+                userId: owner._id,
+                type: 'feedback_alert',
+                title: `Low rating alert (${ratingNum}/5)`,
+                body: `Low rating feedback received: ${ratingNum}/5`,
+              });
+            }
+          }
         }
       }
     }
@@ -411,11 +496,34 @@ export async function createCampaign(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
+  const waNum = await WaNumber.findOne({ _id: input.numberId, businessId: ctx.businessId });
+  if (!waNum) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'WhatsApp number not found');
+  }
+
+  const tmpl = await WaTemplate.findOne({ _id: input.templateId, businessId: ctx.businessId });
+  if (!tmpl) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Template not found');
+  }
+
   let totalAudience = 0;
+  let excludedCount = 0;
+
   if (input.audience.kind === 'selection') {
-    totalAudience = input.audience.customerIds?.length || 0;
+    const customerIds = input.audience.customerIds || [];
+    const customers = await Customer.find({
+      businessId: ctx.businessId,
+      _id: { $in: customerIds },
+    });
+    excludedCount = customers.filter((c) => c.doNotMessage === true || c.waOptIn === false).length;
+    totalAudience = customers.length - excludedCount;
   } else if (input.audience.kind === 'segment') {
-    totalAudience = await Customer.countDocuments({ businessId: ctx.businessId });
+    const totalCustomers = await Customer.countDocuments({ businessId: ctx.businessId });
+    excludedCount = await Customer.countDocuments({
+      businessId: ctx.businessId,
+      $or: [{ doNotMessage: true }, { waOptIn: false }],
+    });
+    totalAudience = totalCustomers - excludedCount;
   }
 
   const campaign = await Campaign.create({
@@ -430,7 +538,15 @@ export async function createCampaign(
     variableMap: input.variableMap,
     status: input.scheduledAt ? 'scheduled' : 'draft',
     scheduledAt: input.scheduledAt ? new Date(input.scheduledAt) : undefined,
-    stats: { sent: 0, delivered: 0, read: 0, failed: 0, costPaise: 0 },
+    stats: {
+      total: totalAudience + excludedCount,
+      excluded: excludedCount,
+      sent: 0,
+      delivered: 0,
+      read: 0,
+      failed: 0,
+      costPaise: 0,
+    },
     createdBy: ctx.userId,
     updatedBy: ctx.userId,
   });
@@ -455,7 +571,7 @@ export async function getCampaigns(ctx: RequestContext) {
   }
 
   return Campaign.find({ businessId: ctx.businessId })
-    .populate('templateId', 'name body')
+    .populate({ path: 'templateId', select: 'name body', options: { skipTenantScope: true } })
     .sort({ createdAt: -1 });
 }
 
@@ -464,8 +580,26 @@ export async function getAutomations(ctx: RequestContext) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  return Automation.find({ businessId: ctx.businessId }).populate('templateId', 'name body');
+  return Automation.find({ businessId: ctx.businessId }).populate({
+    path: 'templateId',
+    select: 'name body',
+    options: { skipTenantScope: true },
+  });
 }
+
+const ALLOWED_AUTOMATION_KEYS = [
+  'booking_confirmation',
+  'reminder_24h',
+  'reminder_2h',
+  'rebooking',
+  'birthday',
+  'anniversary',
+  'winback',
+  'feedback',
+  'review_push',
+  'membership_expiry',
+  'package_last_session',
+];
 
 export async function updateAutomation(
   ctx: RequestContext,
@@ -474,6 +608,10 @@ export async function updateAutomation(
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
+  }
+
+  if (!ALLOWED_AUTOMATION_KEYS.includes(key)) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, `Invalid automation key: ${key}`);
   }
 
   const auto = await Automation.findOneAndUpdate(

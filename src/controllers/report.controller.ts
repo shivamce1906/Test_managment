@@ -21,8 +21,10 @@ export class ReportController {
       const reportName = req.params.name as any;
       const params = {
         branchId: (req.query.branchId as string) || req.ctx.branchId,
-        from: req.query.from as string,
-        to: req.query.to as string,
+        from: (req.query.from as string) || (req.query.fromDate as string),
+        to: (req.query.to as string) || (req.query.toDate as string),
+        fromDate: (req.query.from as string) || (req.query.fromDate as string),
+        toDate: (req.query.to as string) || (req.query.toDate as string),
         staffId: req.query.staffId as string,
         customerId: req.query.customerId as string,
       };
@@ -38,8 +40,10 @@ export class ReportController {
       const reportName = req.params.name as any;
       const params = {
         branchId: (req.query.branchId as string) || req.ctx.branchId,
-        fromDate: req.query.from as string,
-        toDate: req.query.to as string,
+        from: (req.query.from as string) || (req.query.fromDate as string),
+        to: (req.query.to as string) || (req.query.toDate as string),
+        fromDate: (req.query.from as string) || (req.query.fromDate as string),
+        toDate: (req.query.to as string) || (req.query.toDate as string),
       };
       const buffer = await exportReportToExcel(req.ctx, reportName, params);
 

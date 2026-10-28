@@ -13,7 +13,7 @@ import {
 export class PayrollController {
   public static async createPayrollRun(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await createMonthlyRun(req.ctx, req.params.branchId, req.body.month);
+      const result = await createMonthlyRun(req.ctx, req.params.branchId, req.body);
       res.status(201).json(result);
     } catch (err) {
       next(err);
@@ -67,8 +67,7 @@ export class PayrollController {
 
   public static async markPaid(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { payoutMode } = req.body;
-      const result = await markPaid(req.ctx, req.params.id, payoutMode || 'bank_transfer');
+      const result = await markPaid(req.ctx, req.params.id, req.body);
       res.json(result);
     } catch (err) {
       next(err);

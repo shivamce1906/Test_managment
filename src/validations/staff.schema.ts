@@ -49,12 +49,16 @@ export const updateRosterSchema = z.object({
     start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
     end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
     off: z.boolean(),
+  }).refine((w) => w.off || (!w.start || !w.end) || w.start <= w.end, {
+    message: 'start time must be before or equal to end time',
   })),
   overrides: z.array(z.object({
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
     end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
     off: z.boolean(),
+  }).refine((o) => o.off || (!o.start || !o.end) || o.start <= o.end, {
+    message: 'start time must be before or equal to end time',
   })).default([]),
 });
 
@@ -65,6 +69,8 @@ export const markAttendanceSchema = z.object({
     inAt: z.string().datetime().optional(),
     outAt: z.string().datetime().optional(),
     note: z.string().optional(),
+  }).refine((e) => !e.inAt || !e.outAt || new Date(e.outAt) >= new Date(e.inAt), {
+    message: 'outAt must be after or equal to inAt',
   })).min(1, 'At least one attendance entry required'),
   reason: z.string().optional(), // Required when updating past dates
 });
@@ -75,6 +81,8 @@ export const createLeaveSchema = z.object({
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   type: z.enum(['paid', 'unpaid']),
   reason: z.string().optional(),
+}).refine((data) => data.to >= data.from, {
+  message: 'to date must be >= from date',
 });
 
 export const updateLeaveStatusSchema = z.object({

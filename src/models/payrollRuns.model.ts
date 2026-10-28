@@ -43,6 +43,7 @@ export interface IPayrollRun extends Document {
   };
   lockedBy?: Types.ObjectId;
   lockedAt?: Date;
+  draftedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
   __v: number;
@@ -94,6 +95,7 @@ const payrollRunSchema = new Schema<IPayrollRun>(
     },
     lockedBy: { type: Schema.Types.ObjectId, ref: 'users' },
     lockedAt: { type: Date },
+    draftedAt: { type: Date },
   },
   {
     collection: 'payrollRuns',

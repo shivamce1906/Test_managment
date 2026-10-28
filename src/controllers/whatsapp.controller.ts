@@ -14,11 +14,42 @@ import {
   processInboundWebhook,
 } from '../services';
 
+import { Types } from 'mongoose';
+import { WaNumber } from '../models';
+import { AppError, ErrorCode, decryptData } from '../utils';
+import { AiSensyAdapter } from '../integrations/aisensy/aisensy.adapter';
+
 export class WhatsappController {
   public static async processWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      await processInboundWebhook(req.params.numberId, req.body);
-      res.json({ success: true });
+      const numberId = req.params.numberId;
+      if (!numberId || !Types.ObjectId.isValid(numberId)) {
+        res.status(200).json({ success: true });
+        return;
+      }
+
+      const waNum = await WaNumber.findOne({ _id: numberId }, null, { skipTenantScope: true });
+      if (!waNum) {
+        res.status(200).json({ success: true });
+        return;
+      }
+
+      const signature = req.headers['x-aisensy-signature'] as string | undefined;
+      if (signature && waNum.aisensy?.webhookSecretEnc) {
+        let secret = '';
+        try {
+          secret = decryptData(waNum.aisensy.webhookSecretEnc);
+        } catch {
+          secret = waNum.aisensy.webhookSecretEnc;
+        }
+        const adapter = new AiSensyAdapter();
+        if (!adapter.verifyWebhookSignature(secret, signature, req.body)) {
+          throw new AppError(403, ErrorCode.FORBIDDEN, 'Invalid webhook signature');
+        }
+      }
+
+      await processInboundWebhook(numberId, req.body);
+      res.status(200).json({ success: true });
     } catch (err) {
       next(err);
     }

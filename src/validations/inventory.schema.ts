@@ -30,12 +30,17 @@ export const receivePurchaseOrderSchema = z.object({
   })).min(1, 'At least one received item is required'),
 });
 
-export const vendorBillSchema = z.object({
-  number: z.string().min(1, 'Vendor bill number is required'),
-  amountPaise: z.number().int().positive(),
-  paymentStatus: z.enum(['unpaid', 'partly_paid', 'paid']).default('unpaid'),
-  paidPaise: z.number().int().nonnegative().default(0),
-});
+export const vendorBillSchema = z
+  .object({
+    number: z.string().min(1, 'Vendor bill number is required'),
+    amountPaise: z.number().int().positive(),
+    paymentStatus: z.enum(['unpaid', 'partly_paid', 'paid']).default('unpaid'),
+    paidPaise: z.number().int().nonnegative().default(0),
+  })
+  .refine((data) => data.paidPaise <= data.amountPaise, {
+    message: 'Paid amount cannot exceed bill amount',
+    path: ['paidPaise'],
+  });
 export const recordVendorBillSchema = vendorBillSchema;
 
 

@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { getBusinessDate } from '../utils';
 import {
   createStaff,
   updateStaff,
@@ -73,7 +74,7 @@ export class StaffController {
 
   public static async getAttendance(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const date = (req.query.date as string) || new Date().toISOString().slice(0, 10);
+      const date = (req.query.date as string) || getBusinessDate();
       const result = await getAttendance(req.ctx, req.params.branchId, date);
       res.json(result);
     } catch (err) {
@@ -83,7 +84,7 @@ export class StaffController {
 
   public static async markAttendance(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const date = (req.query.date as string) || (req.body.businessDate as string) || new Date().toISOString().slice(0, 10);
+      const date = (req.query.date as string) || (req.body.businessDate as string) || getBusinessDate();
       const result = await markAttendance(req.ctx, req.params.branchId, date, req.body);
       res.json(result);
     } catch (err) {

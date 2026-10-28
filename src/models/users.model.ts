@@ -57,6 +57,18 @@ const userSchema = new Schema<IUser>(
   },
   {
     collection: 'users',
+    toJSON: {
+      transform(_doc, ret) {
+        delete (ret as any).passwordHash;
+        return ret;
+      },
+    },
+    toObject: {
+      transform(_doc, ret) {
+        delete (ret as any).passwordHash;
+        return ret;
+      },
+    },
   }
 );
 

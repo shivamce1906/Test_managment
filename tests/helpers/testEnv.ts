@@ -19,6 +19,7 @@ process.env.RUN_EMBEDDED_WORKER = 'false';
 process.env.RUN_STANDALONE_WORKER = 'true';
 process.env.UPLOAD_DIR = path.join(os.tmpdir(), 'glox-test-uploads');
 process.env.JWT_SECRET = 'test-only-jwt-secret-at-least-32-characters-long';
+process.env.JWT_ACCESS_TTL = '24h';
 process.env.KMS_KEY_ID = 'test-only-kms-key';
 
 export const TEST_GUARD_URI = GUARD_URI;

@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { AuthService } from '../services';
-import { PlatformAdmin, User } from '../models';
+import { PlatformAdmin, User, Business, Branch } from '../models';
 import { AppError, ErrorCode } from '../utils';
 import { RequestContext } from '../services';
 
@@ -28,6 +28,9 @@ export function authenticate(options: { required?: boolean } = { required: true 
         if (!admin || admin.status !== 'active') {
           throw new AppError(401, ErrorCode.USER_INACTIVE, 'Platform administrator account is inactive or not found');
         }
+        if (admin.sessionVersion !== decoded.sv) {
+          throw new AppError(401, 'SESSION_REVOKED', 'Session has been revoked');
+        }
 
         req.ctx = {
           userId: admin._id.toString(),
@@ -44,6 +47,21 @@ export function authenticate(options: { required?: boolean } = { required: true 
         const user = await User.findById(decoded.sub, null, { skipTenantScope: true });
         if (!user || user.status !== 'active') {
           throw new AppError(401, ErrorCode.USER_INACTIVE, 'User account is inactive or not found');
+        }
+        if (user.sessionVersion !== decoded.sv) {
+          throw new AppError(401, 'SESSION_REVOKED', 'Session has been revoked');
+        }
+
+        const business = await Business.findById(user.businessId);
+        if (!business || business.status !== 'active') {
+          throw new AppError(403, 'BUSINESS_SUSPENDED', 'Business is suspended');
+        }
+
+        if (user.role === 'branch' && user.branchLoginFor) {
+          const branch = await Branch.findOne({ _id: user.branchLoginFor, businessId: user.businessId });
+          if (!branch || branch.status !== 'active') {
+            throw new AppError(403, 'BRANCH_INACTIVE', 'Branch is deactivated');
+          }
         }
 
         req.ctx = {

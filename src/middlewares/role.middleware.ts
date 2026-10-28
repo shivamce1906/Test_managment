@@ -7,7 +7,10 @@ export function requireRole(...allowedRoles: string[]) {
       return next(new AppError(401, ErrorCode.UNAUTHENTICATED, 'Authentication required'));
     }
 
-    if (!allowedRoles.includes(req.ctx.role)) {
+    const normalizedAllowed = allowedRoles.flatMap((r) =>
+      r === 'super_admin' || r === 'superadmin' ? ['super_admin', 'superadmin'] : [r]
+    );
+    if (!normalizedAllowed.includes(req.ctx.role)) {
       return next(new AppError(403, ErrorCode.FORBIDDEN, `Access denied for role: ${req.ctx.role}`));
     }
 

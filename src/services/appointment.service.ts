@@ -23,7 +23,7 @@ import {
 } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
-// import { notificationService } from './notification.service'
+import { notificationService } from './notification.service';
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
   booked: ['confirmed', 'arrived', 'cancelled', 'no_show'],
@@ -96,6 +96,13 @@ export class AppointmentService {
 
     if (service.eligibleStaffIds.length > 0) {
       const isEligible = service.eligibleStaffIds.some((id) => id.equals(staffId));
+      if (!isEligible) {
+        throw new AppError(409, 'SLOT_CLASH', `Staff member ${staff.name} is not eligible for service ${service.name}`);
+      }
+    }
+
+    if (staff.serviceIds && staff.serviceIds.length > 0) {
+      const isEligible = staff.serviceIds.some((id: any) => id.equals(serviceId));
       if (!isEligible) {
         throw new AppError(409, 'SLOT_CLASH', `Staff member ${staff.name} is not eligible for service ${service.name}`);
       }
@@ -191,6 +198,10 @@ export class AppointmentService {
       let customerId: Types.ObjectId;
       if (data.customerId) {
         customerId = toObjectId(data.customerId);
+        const existingCustomer = await Customer.findOne({ _id: customerId, businessId }).session(session);
+        if (!existingCustomer) {
+          throw new AppError(404, 'NOT_FOUND', 'Customer not found in this business');
+        }
       } else {
         const phone = normalizePhone(data.newCustomer.phone);
         let customer = await Customer.findOne({ businessId, phone }).session(session);
@@ -237,7 +248,9 @@ export class AppointmentService {
             businessId,
             branchId,
             status: 'active',
+            designation: { $nin: ['receptionist', 'helper'] },
             ...(service.eligibleStaffIds.length > 0 ? { _id: { $in: service.eligibleStaffIds } } : {}),
+            $or: [{ serviceIds: { $size: 0 } }, { serviceIds: serviceId }],
           }).session(session);
 
           let freeStaff: any = null;
@@ -282,6 +295,17 @@ export class AppointmentService {
         if (lineEnd > maxEnd) maxEnd = lineEnd;
       }
 
+      // Check for clashes between lines within this same appointment
+      for (let i = 0; i < lines.length; i++) {
+        for (let j = i + 1; j < lines.length; j++) {
+          if (lines[i].staffId.equals(lines[j].staffId)) {
+            if (isOverlapping(lines[i].start, lines[i].end, lines[j].start, lines[j].end)) {
+              throw new AppError(409, 'SLOT_CLASH', 'Staff cannot be double-booked for overlapping lines in the same appointment');
+            }
+          }
+        }
+      }
+
       const businessDate = getBusinessDate(minStart);
 
       const appointment = new Appointment({
@@ -318,7 +342,7 @@ export class AppointmentService {
       });
 
       // Bump change cursor for calendar screen
-      // await notificationService.bumpScope(businessId.toString(), `appointments:${branchIdStr}:${businessDate}`);
+      await notificationService.bumpScope(businessId.toString(), `appointments:${branchIdStr}:${businessDate}`);
 
       return appointment;
     });
@@ -333,6 +357,7 @@ export class AppointmentService {
     const remainder = 5 * 60 * 1000 - (now.getTime() % (5 * 60 * 1000));
     let startTime = new Date(now.getTime() + remainder);
 
+    const businessId = toObjectId(ctx.businessId!);
     const linesInput: any[] = [];
     for (const serviceId of data.serviceIds) {
       linesInput.push({
@@ -340,7 +365,7 @@ export class AppointmentService {
         start: startTime.toISOString(),
       });
       // Look up service duration to increment startTime for next service
-      const svc = await Service.findById(serviceId);
+      const svc = await Service.findOne({ _id: toObjectId(serviceId), businessId });
       const durationMin = svc ? svc.durationMin : 30;
       startTime = new Date(startTime.getTime() + durationMin * 60 * 1000);
     }
@@ -362,6 +387,18 @@ export class AppointmentService {
     const appointment = await Appointment.findOne({ _id: toObjectId(id), businessId });
     if (!appointment) {
       throw new AppError(404, 'NOT_FOUND', 'Appointment not found');
+    }
+
+    if (ctx.role === 'branch') {
+      const allowed = ctx.branchId === appointment.branchId.toString() || ctx.branchIds?.includes(appointment.branchId.toString());
+      if (!allowed) throw new AppError(403, 'FORBIDDEN', 'Access denied to this branch appointment');
+    }
+    if (ctx.role === 'manager' && !ctx.branchIds?.includes(appointment.branchId.toString())) {
+      throw new AppError(403, 'FORBIDDEN', 'Access denied to this branch appointment');
+    }
+
+    if (newStatus === 'billed' && !appointment.billId) {
+      throw new AppError(422, 'INVALID_TRANSITION', 'Cannot manually set status to billed without a bill');
     }
 
     const currentStatus = appointment.status;
@@ -415,10 +452,10 @@ export class AppointmentService {
       after: { status: newStatus, reason },
     });
 
-    // await notificationService.bumpScope(
-    //   businessId.toString(),
-    //   `appointments:${appointment.branchId.toString()}:${appointment.businessDate}`
-    // );
+    await notificationService.bumpScope(
+      businessId.toString(),
+      `appointments:${appointment.branchId.toString()}:${appointment.businessDate}`
+    );
 
     return appointment;
   }
@@ -487,13 +524,211 @@ export class AppointmentService {
   async getAppointmentById(ctx: RequestContext, id: string): Promise<IAppointment> {
     const businessId = toObjectId(ctx.businessId!);
     const apt = await Appointment.findOne({ _id: toObjectId(id), businessId })
-      .populate('customerId', 'name phone')
-      .populate('lines.serviceId', 'name')
-      .populate('lines.staffId', 'name');
+      .populate({ path: 'customerId', select: 'name phone', options: { skipTenantScope: true } })
+      .populate({ path: 'lines.serviceId', select: 'name', options: { skipTenantScope: true } })
+      .populate({ path: 'lines.staffId', select: 'name', options: { skipTenantScope: true } });
     if (!apt) {
       throw new AppError(404, 'NOT_FOUND', 'Appointment not found');
     }
+
+    if (ctx.role === 'branch' && ctx.branchId && ctx.branchId !== apt.branchId.toString()) {
+      throw new AppError(403, 'FORBIDDEN', 'Access to appointment of another branch is forbidden');
+    }
+    if (ctx.role === 'manager' && ctx.branchIds && !ctx.branchIds.some((bId) => bId.toString() === apt.branchId.toString())) {
+      throw new AppError(403, 'FORBIDDEN', 'Access to appointment of unassigned branch is forbidden');
+    }
+
     return apt;
+  }
+
+  /**
+   * Reschedules an appointment (re-checks slot clashes and intra-appointment clashes).
+   */
+  async rescheduleAppointment(ctx: RequestContext, id: string, updates: any): Promise<IAppointment> {
+    const businessId = toObjectId(ctx.businessId!);
+    const aptId = toObjectId(id);
+
+    return withTransaction(async (session) => {
+      const apt = await Appointment.findOne({ _id: aptId, businessId }).session(session);
+      if (!apt) throw new AppError(404, 'NOT_FOUND', 'Appointment not found');
+
+      if (ctx.role === 'branch' && ctx.branchId && ctx.branchId !== apt.branchId.toString()) {
+        throw new AppError(403, 'FORBIDDEN', 'Access to appointment of another branch is forbidden');
+      }
+      if (ctx.role === 'manager' && ctx.branchIds && !ctx.branchIds.some((bId) => bId.toString() === apt.branchId.toString())) {
+        throw new AppError(403, 'FORBIDDEN', 'Access to appointment of unassigned branch is forbidden');
+      }
+
+      if (apt.status === 'cancelled' || apt.status === 'billed') {
+        throw new AppError(422, 'INVALID_TRANSITION', `Cannot reschedule a ${apt.status} appointment`);
+      }
+
+      if (updates.__v !== undefined && apt.__v !== updates.__v) {
+        throw new AppError(409, 'VERSION_CONFLICT', 'Appointment was modified by another user');
+      }
+
+      if (updates.lines && updates.lines.length > 0) {
+        const resolvedLines = [];
+        let overallStart = new Date(updates.lines[0].start);
+        let overallEnd = new Date(updates.lines[0].start);
+
+        for (const raw of updates.lines) {
+          const service = await Service.findOne({ _id: toObjectId(raw.serviceId), businessId, active: true }).session(session);
+          if (!service) throw new AppError(404, 'NOT_FOUND', `Service ${raw.serviceId} not found`);
+
+          const durationMin = raw.durationMin || service.durationMin;
+          const lineStart = new Date(raw.start);
+          const lineEnd = new Date(lineStart.getTime() + durationMin * 60000);
+
+          if (lineStart < overallStart) overallStart = lineStart;
+          if (lineEnd > overallEnd) overallEnd = lineEnd;
+
+          const staff = await Staff.findOne({ _id: toObjectId(raw.staffId), businessId, status: 'active' }).session(session);
+          if (!staff) throw new AppError(404, 'NOT_FOUND', `Staff ${raw.staffId} not found`);
+
+          // Check slot clash excluding current appointment
+          await this.checkSlotClash(businessId, apt.branchId, staff._id, service._id, lineStart, lineEnd, apt._id, session);
+
+          resolvedLines.push({
+            serviceId: service._id,
+            serviceName: service.name,
+            staffId: staff._id,
+            staffName: staff.name,
+            start: lineStart,
+            end: lineEnd,
+            durationMin,
+            pricePaise: service.basePricePaise,
+          });
+        }
+
+        // Check intra-appointment clashes
+        for (let i = 0; i < resolvedLines.length; i++) {
+          for (let j = i + 1; j < resolvedLines.length; j++) {
+            const l1 = resolvedLines[i];
+            const l2 = resolvedLines[j];
+            if (l1.staffId.equals(l2.staffId)) {
+              if (l1.start < l2.end && l1.end > l2.start) {
+                throw new AppError(409, 'SLOT_CLASH', `Stylist ${l1.staffName} is assigned to overlapping services within this appointment`);
+              }
+            }
+          }
+        }
+
+        apt.lines = resolvedLines as any;
+        apt.start = overallStart;
+        apt.end = overallEnd;
+        apt.businessDate = getBusinessDate(overallStart);
+      }
+
+      if (updates.notes !== undefined) {
+        apt.notes = updates.notes;
+      }
+
+      apt.statusLog.push({
+        status: apt.status,
+        at: new Date(),
+        by: toObjectId(ctx.userId),
+        reason: updates.reason || 'Rescheduled',
+      });
+
+      await apt.save({ session });
+
+      await notificationService.bumpScope(
+        businessId.toString(),
+        `appointments:${apt.branchId.toString()}:${apt.businessDate}`
+      );
+
+      return apt;
+    });
+  }
+
+  /**
+   * Returns free slots on a given date for a service and/or staff.
+   */
+  async getBranchAvailability(
+    ctx: RequestContext,
+    branchIdStr: string,
+    query: { serviceId?: string; staffId?: string; date: string }
+  ): Promise<any> {
+    const businessId = toObjectId(ctx.businessId!);
+    const branchId = toObjectId(branchIdStr);
+
+    const branch = await Branch.findOne({ _id: branchId, businessId });
+    if (!branch) throw new AppError(404, 'NOT_FOUND', 'Branch not found');
+
+    const businessDate = query.date;
+    const isHoliday = branch.holidays.some((h) => h.date === businessDate);
+    if (isHoliday) {
+      return { date: businessDate, slots: [] };
+    }
+
+    const testDate = parseIstDateTime(businessDate, '12:00');
+    const dayOfWeek = getIstDayOfWeek(testDate);
+    const dayHours = branch.hours.find((h) => h.day === dayOfWeek);
+    if (!dayHours || dayHours.closed || !dayHours.open || !dayHours.close) {
+      return { date: businessDate, slots: [] };
+    }
+
+    let service: any = null;
+    let durationMin = 30;
+    if (query.serviceId) {
+      service = await Service.findOne({ _id: toObjectId(query.serviceId), businessId, active: true });
+      if (service) {
+        durationMin = service.durationMin;
+      }
+    }
+
+    // Find eligible staff
+    let staffList = await Staff.find({
+      businessId,
+      branchId,
+      status: 'active',
+      designation: { $in: ['stylist', 'senior_stylist', 'beautician'] },
+      ...(query.staffId ? { _id: toObjectId(query.staffId) } : {}),
+    });
+
+    if (service) {
+      staffList = staffList.filter((s) => {
+        if (service.eligibleStaffIds.length > 0 && !service.eligibleStaffIds.some((id: any) => id.equals(s._id))) {
+          return false;
+        }
+        if (s.serviceIds && s.serviceIds.length > 0 && !s.serviceIds.some((id: any) => id.equals(service._id))) {
+          return false;
+        }
+        return true;
+      });
+    }
+
+    const branchOpenDate = parseIstDateTime(businessDate, dayHours.open);
+    const branchCloseDate = parseIstDateTime(businessDate, dayHours.close);
+
+    const freeSlots: any[] = [];
+    const stepMs = 30 * 60000;
+
+    for (let slotTime = branchOpenDate.getTime(); slotTime + durationMin * 60000 <= branchCloseDate.getTime(); slotTime += stepMs) {
+      const start = new Date(slotTime);
+      const end = new Date(slotTime + durationMin * 60000);
+
+      const availableStaff = [];
+      for (const st of staffList) {
+        try {
+          await this.checkSlotClash(businessId, branchId, st._id, service ? service._id : new Types.ObjectId(), start, end);
+          availableStaff.push({ staffId: st._id, name: st.name });
+        } catch {
+          // Clash, ignore
+        }
+      }
+
+      if (availableStaff.length > 0) {
+        freeSlots.push({
+          start: start.toISOString(),
+          end: end.toISOString(),
+          availableStaff,
+        });
+      }
+    }
+
+    return { date: businessDate, slots: freeSlots };
   }
 }
 

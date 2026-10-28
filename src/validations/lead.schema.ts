@@ -24,4 +24,12 @@ export const updateLeadSchema = z.object({
   assignedTo: objectIdSchema.optional(),
   followUpDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   notes: z.string().optional(),
+}).refine((data) => {
+  if (data.stage === 'lost') {
+    return !!data.lostReason && data.lostReason.trim().length > 0;
+  }
+  return true;
+}, {
+  message: 'lostReason is required when stage is lost',
+  path: ['lostReason'],
 });

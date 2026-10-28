@@ -13,6 +13,7 @@ export const ErrorCode = {
   NOT_FOUND: 'NOT_FOUND',
   RESOURCE_NOT_FOUND: 'NOT_FOUND',
   VERSION_CONFLICT: 'VERSION_CONFLICT',
+  CONFLICT: 'CONFLICT',
   DUPLICATE_PHONE: 'DUPLICATE_PHONE',
   DUPLICATE_EMAIL: 'DUPLICATE_EMAIL',
   SLOT_CLASH: 'SLOT_CLASH',
@@ -33,6 +34,8 @@ export const ErrorCode = {
   WA_NOT_CONFIGURED: 'WA_NOT_CONFIGURED',
   WA_LOW_BALANCE: 'WA_LOW_BALANCE',
   BRANCH_INACTIVE: 'BRANCH_INACTIVE',
+  SERVICE_INACTIVE_AT_BRANCH: 'SERVICE_INACTIVE_AT_BRANCH',
+  BUSINESS_SUSPENDED: 'BUSINESS_SUSPENDED',
   RATE_LIMITED: 'RATE_LIMITED',
   TENANT_SCOPE_MISSING: 'TENANT_SCOPE_MISSING',
   INSUFFICIENT_STOCK: 'INSUFFICIENT_STOCK',
@@ -70,6 +73,7 @@ export class AppError extends Error {
   ) {
     super(message);
     this.name = 'AppError';
+    Object.setPrototypeOf(this, AppError.prototype);
     this.statusCode = statusCode;
     this.code = code;
     this.fields = options?.fields;

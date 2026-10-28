@@ -6,6 +6,7 @@ import {
   Attendance,
   Bill,
   Advance,
+  Business,
   withTransaction,
 } from '../models';
 import { AppError, ErrorCode, getDaysInMonth } from '../utils';
@@ -37,8 +38,8 @@ export async function createMonthlyRun(
 
   if (existing && existing.status !== 'draft') {
     throw new AppError(
-      400,
-      ErrorCode.BAD_REQUEST,
+      409,
+      ErrorCode.CONFLICT,
       `Payroll run for ${month} is already ${existing.status}`
     );
   }
@@ -56,6 +57,8 @@ export async function createMonthlyRun(
     branchId: toObjectId(branchId),
     status: 'active',
   });
+
+  const business = await Business.findById(toObjectId(ctx.businessId));
 
   const lines: any[] = [];
   let totalNetPaise = 0;
@@ -140,14 +143,34 @@ export async function createMonthlyRun(
     let esiPaise = 0;
     let ptPaise = 0;
 
-    if (staff.statutory.pf && salaryPaise > 0) {
-      pfPaise = Math.round(salaryPaise * 0.12);
+    if (business?.payroll?.pf?.enabled && staff.statutory?.pf && salaryPaise > 0) {
+      const ceiling = business.payroll.pf.wageCeilingPaise ?? 1500000;
+      const pct = business.payroll.pf.employeePct ?? 12;
+      const eligibleSalary = Math.min(salaryPaise, ceiling);
+      pfPaise = Math.round((eligibleSalary * pct) / 100);
     }
-    if (staff.statutory.esi && salaryPaise > 0) {
-      esiPaise = Math.round(salaryPaise * 0.0075);
+    if (business?.payroll?.esi?.enabled && staff.statutory?.esi && salaryPaise > 0) {
+      const ceiling = business.payroll.esi.wageCeilingPaise ?? 2100000;
+      const pct = business.payroll.esi.employeePct ?? 0.75;
+      if (salaryPaise <= ceiling) {
+        esiPaise = Math.round((salaryPaise * pct) / 100);
+      }
     }
-    if (staff.statutory.pt && salaryPaise > 1000000) {
-      ptPaise = 20000;
+    if (business?.payroll?.pt?.enabled && staff.statutory?.pt && salaryPaise > 0) {
+      const slabs = business.payroll.pt.slabs || [];
+      let matched = false;
+      for (const slab of slabs) {
+        if (slab.uptoPaise && salaryPaise <= slab.uptoPaise) {
+          ptPaise = slab.amountPaise;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched && slabs.length > 0) {
+        ptPaise = slabs[slabs.length - 1].amountPaise;
+      } else if (slabs.length === 0 && salaryPaise > 1000000) {
+        ptPaise = 20000;
+      }
     }
 
     const netPaise = Math.max(
@@ -183,10 +206,12 @@ export async function createMonthlyRun(
     });
   }
 
+  const now = new Date();
   let run: any;
   if (existing) {
     existing.lines = lines;
     existing.totals = { netPaise: totalNetPaise };
+    existing.draftedAt = now;
     (existing as any).updatedBy = toObjectId(ctx.userId);
     run = await existing.save();
   } else {
@@ -195,6 +220,7 @@ export async function createMonthlyRun(
       branchId: toObjectId(branchId),
       month,
       status: 'draft',
+      draftedAt: now,
       lines,
       totals: { netPaise: totalNetPaise },
       createdBy: toObjectId(ctx.userId),
@@ -347,16 +373,17 @@ export async function lockRun(
       throw new AppError(400, ErrorCode.BAD_REQUEST, `Run is already ${run.status}`);
     }
 
+    const runDraftedAt = run.draftedAt || (run as any).updatedAt || run.createdAt;
     const staleBill = await Bill.findOne({
       businessId,
       branchId: run.branchId,
-      updatedAt: { $gt: run.createdAt },
+      updatedAt: { $gt: runDraftedAt },
       businessDate: { $regex: `^${run.month}` },
     }).session(session);
 
     if (staleBill) {
       throw new AppError(
-        400,
+        409,
         ErrorCode.PAYROLL_STALE,
         'Bills have changed since this payroll draft was generated. Please regenerate the draft.'
       );

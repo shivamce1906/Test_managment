@@ -44,13 +44,30 @@ export class AuthService {
 
       // Check session version in Redis (or DB fallback)
       const cachedSv = await this.redis.get(`sv:${decoded.sub}`);
-      if (cachedSv !== null && parseInt(cachedSv, 10) !== decoded.sv) {
+      let sv: number | null = cachedSv !== null ? parseInt(cachedSv, 10) : null;
+      if (sv === null) {
+        if (decoded.kind === 'platform') {
+          const admin = await PlatformAdmin.findById(decoded.sub);
+          if (admin) {
+            sv = admin.sessionVersion;
+            await this.redis.set(`sv:${admin._id}`, sv.toString());
+          }
+        } else {
+          const user = await User.findById(decoded.sub, null, { skipTenantScope: true });
+          if (user) {
+            sv = user.sessionVersion;
+            await this.redis.set(`sv:${user._id}`, sv.toString());
+          }
+        }
+      }
+
+      if (sv !== null && sv !== decoded.sv) {
         throw new AppError(401, 'SESSION_REVOKED', 'Session has been revoked');
       }
 
       return decoded;
     } catch (err: any) {
-      if (err instanceof AppError) throw err;
+      if (err instanceof AppError || err.name === 'AppError' || err.statusCode) throw err;
       throw new AppError(401, 'UNAUTHENTICATED', err.message || 'Invalid access token');
     }
   }
@@ -74,7 +91,7 @@ export class AuthService {
   /**
    * Rotates a refresh token.
    */
-  async rotateRefreshToken(refreshTokenString: string): Promise<{ accessToken: string; newRefreshToken: string }> {
+  async rotateRefreshToken(refreshTokenString: string): Promise<{ accessToken: string; refreshToken: string; newRefreshToken: string }> {
     const parts = refreshTokenString.split('.');
     if (parts.length !== 3) {
       throw new AppError(401, 'UNAUTHENTICATED', 'Invalid refresh token format');
@@ -82,12 +99,17 @@ export class AuthService {
 
     const [userId, tokenId, secret] = parts;
     const key = `rt:${userId}:${tokenId}`;
+    const usedKey = `rt_used:${userId}:${tokenId}`;
     const storedHash = await this.redis.get(key);
 
     if (!storedHash) {
-      // Possible token reuse attack: revoke all user sessions
-      await this.revokeAllSessions(userId);
-      throw new AppError(401, 'SESSION_REVOKED', 'Refresh token reused or expired, all sessions revoked');
+      const wasUsed = await this.redis.get(usedKey);
+      if (wasUsed) {
+        // Token reuse attack: revoke all user sessions
+        await this.revokeAllSessions(userId);
+        throw new AppError(401, 'SESSION_REVOKED', 'Refresh token reused, all sessions revoked');
+      }
+      throw new AppError(401, 'UNAUTHENTICATED', 'Invalid or expired refresh token');
     }
 
     const isValid = await verifyPassword(secret, storedHash);
@@ -95,8 +117,9 @@ export class AuthService {
       throw new AppError(401, 'UNAUTHENTICATED', 'Invalid refresh token secret');
     }
 
-    // Delete used token (rotation)
+    // Delete used token and mark as used for 300 seconds (rotation)
     await this.redis.del(key);
+    await this.redis.set(usedKey, '1', 'EX', 300);
 
     // Look up user
     let user = await User.findById(userId, null, { skipTenantScope: true });
@@ -107,6 +130,16 @@ export class AuthService {
     if (user) {
       if (user.status !== 'active') {
         throw new AppError(403, 'ACCOUNT_INACTIVE', 'Account is inactive');
+      }
+      const business = await Business.findById(user.businessId);
+      if (!business || business.status !== 'active') {
+        throw new AppError(403, 'BUSINESS_SUSPENDED', 'Business is suspended');
+      }
+      if (user.role === 'branch' && user.branchLoginFor) {
+        const branch = await Branch.findOne({ _id: user.branchLoginFor, businessId: user.businessId });
+        if (!branch || branch.status !== 'active') {
+          throw new AppError(422, 'BRANCH_INACTIVE', 'Branch is inactive');
+        }
       }
       role = user.role;
       payload = {
@@ -133,7 +166,7 @@ export class AuthService {
     const accessToken = this.generateAccessToken(payload);
     const newRefreshToken = await this.issueRefreshToken(userId, role);
 
-    return { accessToken, newRefreshToken };
+    return { accessToken, refreshToken: newRefreshToken, newRefreshToken };
   }
 
   /**
@@ -320,7 +353,7 @@ export class AuthService {
   async setPassword(ctx: RequestContext, targetUserId: string, newPassword: string): Promise<void> {
     const passwordHash = await hashPassword(newPassword);
 
-    if (ctx.role === 'superadmin') {
+    if (ctx.role === 'superadmin' || ctx.role === 'super_admin') {
       // Super admin can reset any password
       const user = await User.findById(targetUserId, null, { skipTenantScope: true });
       if (user) {

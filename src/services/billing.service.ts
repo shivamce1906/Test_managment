@@ -20,11 +20,13 @@ import {
   Counter,
   DailySummary,
   Staff,
+  PayrollRun,
   withTransaction,
   IBill,
 } from '../models';
 import {
   AppError,
+  ErrorCode,
   getBusinessDate,
   getFinancialYear,
   generateRandomToken,
@@ -96,6 +98,7 @@ export class BillingService {
     let customer: any = null;
     if (draft.customerId) {
       customer = await Customer.findOne({ _id: toObjectId(draft.customerId), businessId });
+      if (!customer) throw new AppError(404, 'NOT_FOUND', 'Customer not found');
     }
 
     // Build compute input lines
@@ -140,9 +143,9 @@ export class BillingService {
   private checkDiscountLimit(ctx: RequestContext, business: any, draft: any, computed: any): boolean {
     if (ctx.role === 'owner') return false; // Owner has unlimited discount authority
 
-    let allowedBps = business.discountLimits.branchBps || 1000;
+    let allowedBps = business.discountLimits?.branchBps || 1000;
     if (ctx.role === 'manager') {
-      allowedBps = business.discountLimits.managerBps || 2000;
+      allowedBps = ctx.flags?.maxDiscountBps !== undefined ? ctx.flags.maxDiscountBps : (business.discountLimits?.managerBps || 2000);
     }
 
     // Check whole-bill discount
@@ -192,15 +195,41 @@ export class BillingService {
         if (!svc) throw new AppError(404, 'NOT_FOUND', `Service ${raw.refId} not found`);
 
         const bp = svc.branchPrices.find((p) => p.branchId.equals(branchId));
+        if (bp && bp.active === false) {
+          throw new AppError(422, 'SERVICE_INACTIVE_AT_BRANCH', `Service ${svc.name} is deactivated at this branch`);
+        }
         const unitPricePaise = bp && bp.pricePaise !== undefined ? bp.pricePaise : svc.basePricePaise;
 
         // Resolve staff
-        const staff = (raw.staff || []).map((st: any) => ({
-          staffId: toObjectId(st.staffId),
-          name: st.name || 'Staff',
-          splitBps: st.splitBps,
-          rule: svc.commission,
-        }));
+        const staff = [];
+        for (const st of raw.staff || []) {
+          const staffMember = await Staff.findOne({ _id: toObjectId(st.staffId), businessId, status: 'active' }).session(session || null);
+          if (!staffMember) {
+            throw new AppError(404, 'NOT_FOUND', `Staff ${st.staffId} not found`);
+          }
+          const rule = (svc.commission && svc.commission.type) ? svc.commission : staffMember.commission?.service;
+          staff.push({
+            staffId: staffMember._id,
+            name: staffMember.name,
+            splitBps: st.splitBps,
+            rule,
+          });
+        }
+
+        // Consumables used
+        const consumablesUsed = [];
+        for (const c of svc.consumables || []) {
+          const cProd = await Product.findOne({ _id: c.productId, businessId }).session(session || null);
+          const totalQty = c.qty * (raw.qty || 1);
+          const costPaise = cProd && cProd.unitsPerPurchase
+            ? Math.round((totalQty * (cProd.purchasePricePaise || 0)) / cProd.unitsPerPurchase)
+            : 0;
+          consumablesUsed.push({
+            productId: c.productId,
+            qty: totalQty,
+            costPaise,
+          });
+        }
 
         inputLines.push({
           _id: raw._id ? toObjectId(raw._id) : new Types.ObjectId(),
@@ -212,23 +241,27 @@ export class BillingService {
           unitPricePaise,
           lineDiscount: raw.lineDiscount,
           staff,
-          consumablesUsed: (svc.consumables || []).map((c) => ({
-            productId: c.productId,
-            qty: c.qty * (raw.qty || 1),
-            costPaise: 0,
-          })),
+          consumablesUsed,
         });
       } else if (raw.kind === 'product') {
         const prod = await Product.findOne({ _id: refId, businessId, active: true }).session(session || null);
         if (!prod) throw new AppError(404, 'NOT_FOUND', `Product ${raw.refId} not found`);
 
         const unitPricePaise = prod.sellingPricePaise || prod.mrpPaise || 0;
-        const staff = (raw.staff || []).map((st: any) => ({
-          staffId: toObjectId(st.staffId),
-          name: st.name || 'Staff',
-          splitBps: 10000,
-          productBps: 0,
-        }));
+        const staff = [];
+        for (const st of raw.staff || []) {
+          const staffMember = await Staff.findOne({ _id: toObjectId(st.staffId), businessId, status: 'active' }).session(session || null);
+          if (!staffMember) {
+            throw new AppError(404, 'NOT_FOUND', `Staff ${st.staffId} not found`);
+          }
+          const productBps = staffMember.commission?.productBps || 0;
+          staff.push({
+            staffId: staffMember._id,
+            name: staffMember.name,
+            splitBps: st.splitBps || 10000,
+            productBps,
+          });
+        }
 
         inputLines.push({
           _id: raw._id ? toObjectId(raw._id) : new Types.ObjectId(),
@@ -352,6 +385,19 @@ export class BillingService {
           }).session(session);
           if (!plan) throw new AppError(422, 'PLAN_INACTIVE', 'Package plan not found or inactive');
 
+          if (plan.validTill && plan.validTill < businessDate) {
+            throw new AppError(422, 'PLAN_INACTIVE', 'Package has expired');
+          }
+          if (plan.status === 'frozen') {
+            throw new AppError(422, 'PLAN_INACTIVE', 'Package is frozen');
+          }
+          if (plan.planSnap?.branchScope && plan.planSnap.branchScope.length > 0) {
+            const inScope = plan.planSnap.branchScope.some((b: any) => b.toString() === branchId.toString());
+            if (!inScope) {
+              throw new AppError(422, 'PLAN_OUT_OF_SCOPE', 'Package cannot be redeemed at this branch');
+            }
+          }
+
           const lineIdx = red.lineId !== undefined ? Number(red.lineId) : 0;
           const targetLine = inputLines[lineIdx];
           if (!targetLine) throw new AppError(422, 'NO_SESSIONS_LEFT', 'Invalid lineId for package redemption');
@@ -377,21 +423,60 @@ export class BillingService {
           }).session(session);
           if (!plan) throw new AppError(422, 'PLAN_INACTIVE', 'Membership not found or inactive');
 
+          if (plan.validTill && plan.validTill < businessDate) {
+            throw new AppError(422, 'PLAN_INACTIVE', 'Membership has expired');
+          }
+          if (plan.status === 'frozen') {
+            throw new AppError(422, 'PLAN_INACTIVE', 'Membership is frozen');
+          }
+          if (plan.planSnap?.branchScope && plan.planSnap.branchScope.length > 0) {
+            const inScope = plan.planSnap.branchScope.some((b: any) => b.toString() === branchId.toString());
+            if (!inScope) {
+              throw new AppError(422, 'PLAN_OUT_OF_SCOPE', 'Membership cannot be redeemed at this branch');
+            }
+          }
+
           enrichedRedemptions.push({
             kind: 'membership',
             refId: plan._id,
             membershipDiscountBps: plan.planSnap?.membership?.serviceDiscountBps || 0,
+            productDiscountBps: plan.planSnap?.membership?.productDiscountBps || 0,
             amountPaise: 0,
           });
+        } else if (red.kind === 'voucher') {
+          const voucher = await CustomerPlan.findOne({
+            _id: toObjectId(red.refId),
+            businessId,
+            status: 'active',
+          }).session(session);
+          if (!voucher) throw new AppError(422, 'PLAN_INACTIVE', 'Voucher not found or inactive');
+          if (voucher.validTill && voucher.validTill < businessDate) {
+            throw new AppError(422, 'PLAN_INACTIVE', 'Voucher has expired');
+          }
+          const voucherVal = voucher.planSnap?.voucher?.valuePaise || voucher.planSnap?.pricePaise || 0;
+          enrichedRedemptions.push({
+            kind: 'voucher',
+            refId: voucher._id,
+            amountPaise: voucherVal,
+          });
         } else if (red.kind === 'loyalty') {
-          if (customer.loyaltyPoints < (red.points || 0)) {
+          if (!business.loyalty?.enabled) {
+            throw new AppError(422, 'VALIDATION_ERROR', 'Loyalty program is not enabled');
+          }
+          const points = red.points || 0;
+          if (business.loyalty.minRedeem && points < business.loyalty.minRedeem) {
+            throw new AppError(422, 'VALIDATION_ERROR', `Minimum ${business.loyalty.minRedeem} loyalty points required to redeem`);
+          }
+          if (customer.loyaltyPoints < points) {
             throw new AppError(422, 'INSUFFICIENT_WALLET', 'Insufficient loyalty points');
           }
+          const redeemValuePaise = business.loyalty.redeemValuePaise || 100;
+          const calculatedAmountPaise = points * redeemValuePaise;
           enrichedRedemptions.push({
             kind: 'loyalty',
             refId: customer._id,
-            points: red.points,
-            amountPaise: red.amountPaise,
+            points,
+            amountPaise: calculatedAmountPaise,
           });
         }
       }
@@ -416,6 +501,14 @@ export class BillingService {
       };
 
       const computed = computeBill(computeInput);
+
+      // Check for overpayment (payments > total + tips)
+      const totalPayments = (draft.payments || []).reduce((acc: number, p: any) => acc + (p.amountPaise || 0), 0);
+      const totalTips = (draft.tips || []).reduce((acc: number, t: any) => acc + (t.amountPaise || 0), 0);
+      const expectedPayable = computed.totals.totalPaise + totalTips;
+      if (totalPayments > expectedPayable) {
+        throw new AppError(422, 'VALIDATION_ERROR', `Payments (${totalPayments}) cannot exceed total payable (${expectedPayable})`);
+      }
 
       // 5. Determine bill status
       const approvalReasons: ('discount_over_limit' | 'partly_paid')[] = [];
@@ -534,20 +627,31 @@ export class BillingService {
     const businessDate = bill.businessDate;
     const actorId = userId || bill.billedByStaffId || businessId;
 
-    // 1. Consume package sessions
+    // 1. Consume package sessions, vouchers, loyalty
     for (const red of bill.redemptions) {
       if (red.kind === 'package') {
         const line = bill.lines.find((l) => l._id && red.lineId && l._id.equals(red.lineId));
         if (line) {
           await CustomerPlan.updateOne(
-            { _id: red.refId, 'sessions.serviceId': line.refId },
+            { _id: red.refId, businessId, 'sessions.serviceId': line.refId },
             { $inc: { 'sessions.$.used': 1 } },
             { session }
           );
         }
+      } else if (red.kind === 'voucher') {
+        await CustomerPlan.updateOne(
+          { _id: red.refId, businessId },
+          { $set: { status: 'used' } },
+          { session }
+        );
       } else if (red.kind === 'loyalty') {
         if (red.points) {
-          customer.loyaltyPoints = Math.max(0, customer.loyaltyPoints - red.points);
+          customer.loyaltyPoints = Math.max(0, (customer.loyaltyPoints || 0) - red.points);
+          await Customer.updateOne(
+            { _id: customer._id, businessId },
+            { $inc: { loyaltyPoints: -red.points } },
+            { session }
+          );
           await new LoyaltyLedger({
             businessId,
             customerId: customer._id,
@@ -589,7 +693,7 @@ export class BillingService {
     // 3. Process sold lines (memberships, packages, wallet top-ups, vouchers)
     for (const l of bill.lines) {
       if (l.kind === 'membership' || l.kind === 'package' || l.kind === 'voucher') {
-        const plan = await Plan.findById(l.refId).session(session || null);
+        const plan = await Plan.findOne({ _id: l.refId, businessId }).session(session || null);
         if (plan) {
           const validFromDate = new Date();
           const validTillDate = new Date(validFromDate.getTime() + plan.validityDays * 24 * 60 * 60 * 1000);
@@ -631,7 +735,7 @@ export class BillingService {
           await customerPlan.save({ session });
         }
       } else if (l.kind === 'wallet_topup') {
-        const plan = await Plan.findById(l.refId).session(session || null);
+        const plan = await Plan.findOne({ _id: l.refId, businessId }).session(session || null);
         const creditPaise = plan?.walletOffer?.creditPaise || l.unitPricePaise;
         const paidPaise = l.unitPricePaise;
         const bonusPaise = Math.max(0, creditPaise - paidPaise);
@@ -712,7 +816,8 @@ export class BillingService {
       }
     }
 
-    // 4. Handle due amount
+    // 4. Handle due amount & collectDues
+    let dueDelta = 0;
     if (bill.totals.duePaise > 0) {
       await new Due({
         businessId,
@@ -725,15 +830,23 @@ export class BillingService {
         settlements: [],
       }).save({ session });
 
-      customer.duePaise += bill.totals.duePaise;
+      dueDelta += bill.totals.duePaise;
     }
 
     // 5. Settle old dues if collectDues was specified
-    if (collectDues && collectDues.length > 0) {
+    const totalPaid = (bill.payments || []).reduce((acc: number, p: any) => acc + (p.amountPaise || 0), 0);
+    const totalTips = (bill.tips || []).reduce((acc: number, t: any) => acc + (t.amountPaise || 0), 0);
+    let availableForDues = Math.max(0, totalPaid - bill.totals.totalPaise - totalTips);
+
+    if (collectDues && collectDues.length > 0 && availableForDues > 0) {
       for (const item of collectDues) {
+        if (availableForDues <= 0) break;
         const due = await Due.findOne({ _id: toObjectId(item.dueId), businessId, status: 'open' }).session(session || null);
         if (due) {
-          const settleAmt = Math.min(item.amountPaise, due.amountPaise - due.settledPaise);
+          const requested = Math.min(item.amountPaise, due.amountPaise - due.settledPaise);
+          const settleAmt = Math.min(requested, availableForDues);
+          if (settleAmt <= 0) continue;
+
           due.settledPaise += settleAmt;
           if (due.settledPaise >= due.amountPaise) {
             due.status = 'settled';
@@ -745,7 +858,8 @@ export class BillingService {
           });
           await due.save({ session });
 
-          customer.duePaise = Math.max(0, customer.duePaise - settleAmt);
+          availableForDues -= settleAmt;
+          dueDelta -= settleAmt;
         }
       }
     }
@@ -769,15 +883,41 @@ export class BillingService {
       );
     }
 
-    // 7. Update customer statistics
-    customer.stats.visits += 1;
-    customer.stats.spendPaise += bill.totals.totalPaise;
-    customer.stats.lastVisit = businessDate;
-    if (!customer.stats.firstVisit) {
-      customer.stats.firstVisit = businessDate;
+    // 7. Update customer statistics & loyalty points
+    const business = await Business.findById(businessId).session(session || null);
+    let loyaltyDelta = 0;
+    if (business?.loyalty?.enabled && (bill.status === 'paid' || bill.status === 'partly_paid')) {
+      const earnRate = business.loyalty.earnPer100 || 1;
+      const earnedPoints = Math.floor(bill.totals.totalPaise / 10000) * earnRate;
+      if (earnedPoints > 0) {
+        loyaltyDelta = earnedPoints;
+        await new LoyaltyLedger({
+          businessId,
+          customerId: customer._id,
+          type: 'earn',
+          points: earnedPoints,
+          billId: bill._id,
+          balanceAfter: (customer.loyaltyPoints || 0) + earnedPoints,
+        }).save({ session });
+      }
     }
 
-    await customer.save({ session });
+    await Customer.updateOne(
+      { _id: customer._id, businessId },
+      {
+        $inc: {
+          'stats.visits': 1,
+          'stats.spendPaise': bill.totals.totalPaise,
+          ...(loyaltyDelta > 0 ? { loyaltyPoints: loyaltyDelta } : {}),
+          ...(dueDelta !== 0 ? { duePaise: dueDelta } : {}),
+        },
+        $set: {
+          'stats.lastVisit': businessDate,
+          ...(customer.stats?.firstVisit ? {} : { 'stats.firstVisit': businessDate }),
+        },
+      },
+      { session }
+    );
 
     // 8. Update DailySummary (upsert using $inc)
     const summaryId = `${branchId.toString()}:${businessDate}`;
@@ -835,6 +975,10 @@ export class BillingService {
       const bill = await Bill.findOne({ _id: billId, businessId }).session(session);
       if (!bill) throw new AppError(404, 'NOT_FOUND', 'Bill not found');
 
+      if (ctx.role === 'manager' && ctx.branchIds && !ctx.branchIds.some((bId) => bId.toString() === bill.branchId.toString())) {
+        throw new AppError(403, 'FORBIDDEN', 'Cannot approve bill for a branch you do not manage');
+      }
+
       if (bill.status !== 'awaiting_approval') {
         throw new AppError(422, 'INVALID_TRANSITION', 'Bill is not awaiting approval');
       }
@@ -879,6 +1023,10 @@ export class BillingService {
     const bill = await Bill.findOne({ _id: billId, businessId });
     if (!bill) throw new AppError(404, 'NOT_FOUND', 'Bill not found');
 
+    if (ctx.role === 'manager' && ctx.branchIds && !ctx.branchIds.some((bId) => bId.toString() === bill.branchId.toString())) {
+      throw new AppError(403, 'FORBIDDEN', 'Cannot reject bill for a branch you do not manage');
+    }
+
     if (bill.status !== 'awaiting_approval') {
       throw new AppError(422, 'INVALID_TRANSITION', 'Bill is not awaiting approval');
     }
@@ -919,8 +1067,30 @@ export class BillingService {
       const bill = await Bill.findOne({ _id: billId, businessId }).session(session);
       if (!bill) throw new AppError(404, 'NOT_FOUND', 'Bill not found');
 
+      if (ctx.role === 'branch' && ctx.branchId && ctx.branchId !== bill.branchId.toString()) {
+        throw new AppError(403, 'FORBIDDEN', 'Access to bill of another branch is forbidden');
+      }
+      if (ctx.role === 'manager' && ctx.branchIds && !ctx.branchIds.some((bId) => bId.toString() === bill.branchId.toString())) {
+        throw new AppError(403, 'FORBIDDEN', 'Access to bill of unassigned branch is forbidden');
+      }
+
       if (bill.status === 'cancelled') {
         throw new AppError(422, 'INVALID_TRANSITION', 'Bill is already cancelled');
+      }
+      if (bill.status === 'rejected') {
+        throw new AppError(422, 'INVALID_TRANSITION', 'Cannot cancel a rejected bill');
+      }
+
+      // Check locked payroll month
+      const month = bill.businessDate.slice(0, 7);
+      const lockedRun = await PayrollRun.findOne({
+        businessId,
+        branchId: bill.branchId,
+        month,
+        status: { $in: ['locked', 'paid'] },
+      }).session(session);
+      if (lockedRun) {
+        throw new AppError(409, 'INVALID_TRANSITION', 'Bills in a locked payroll month cannot be cancelled');
       }
 
       // Check if day closure is approved: owner only!
@@ -938,81 +1108,111 @@ export class BillingService {
         }
       }
 
-      // 1. Compensating reversals
       const customer = await Customer.findOne({ _id: bill.customerId, businessId }).session(session);
 
-      // Revert package redemptions
-      for (const red of bill.redemptions) {
-        if (red.kind === 'package') {
-          const line = bill.lines.find((l) => l._id && red.lineId && l._id.equals(red.lineId));
-          if (line) {
+      // Only reverse effects if the bill was actually paid or partly_paid (not awaiting_approval)
+      if (bill.status === 'paid' || bill.status === 'partly_paid') {
+        // Revert package & voucher redemptions
+        for (const red of bill.redemptions) {
+          if (red.kind === 'package') {
+            const line = bill.lines.find((l) => l._id && red.lineId && l._id.equals(red.lineId));
+            if (line) {
+              await CustomerPlan.updateOne(
+                { _id: red.refId, businessId, 'sessions.serviceId': line.refId },
+                { $inc: { 'sessions.$.used': -1 } },
+                { session }
+              );
+            }
+          } else if (red.kind === 'voucher') {
             await CustomerPlan.updateOne(
-              { _id: red.refId, 'sessions.serviceId': line.refId },
-              { $inc: { 'sessions.$.used': -1 } },
+              { _id: red.refId, businessId },
+              { $set: { status: 'active' } },
               { session }
             );
           }
         }
-      }
 
-      // Revert wallet payment
-      const walletPayment = bill.payments.find((p) => p.mode === 'wallet');
-      if (walletPayment && customer) {
-        customer.walletBalancePaise += walletPayment.amountPaise;
-        await Customer.updateOne(
-          { _id: customer._id, businessId },
-          { $inc: { walletBalancePaise: walletPayment.amountPaise } },
-          { session }
-        );
-
-        await new WalletLedger({
-          businessId,
-          customerId: customer._id,
-          branchId: bill.branchId,
-          type: 'reverse',
-          amountPaise: walletPayment.amountPaise,
-          billId: bill._id,
-          reason: `Bill ${bill.invoiceNo} cancellation`,
-          balanceAfterPaise: customer.walletBalancePaise,
-        }).save({ session });
-      }
-
-      // Cancel sold customer plans
-      for (const sp of soldPlans) {
-        sp.status = 'cancelled';
-        await sp.save({ session });
-      }
-
-      // Reverse stock movements
-      for (const l of bill.lines) {
-        if (l.kind === 'product') {
-          await new StockMovement({
-            businessId,
-            branchId: bill.branchId,
-            productId: l.refId,
-            pool: 'retail',
-            type: 'cancel_reverse',
-            qty: l.qty,
-            costPaise: 0,
-            refType: 'bill',
-            refId: bill._id,
-            businessDate: bill.businessDate,
-          }).save({ session });
-
-          await StockBalance.findOneAndUpdate(
-            { businessId, branchId: bill.branchId, productId: l.refId, pool: 'retail' },
-            { $inc: { qty: l.qty }, $set: { lastMovementAt: new Date() } },
-            { upsert: true, session }
+        // Revert wallet payment
+        const walletPayment = bill.payments.find((p) => p.mode === 'wallet');
+        if (walletPayment && customer) {
+          await Customer.updateOne(
+            { _id: customer._id, businessId },
+            { $inc: { walletBalancePaise: walletPayment.amountPaise } },
+            { session }
           );
-        } else if (l.kind === 'service' && l.consumablesUsed) {
-          for (const c of l.consumablesUsed) {
+
+          await new WalletLedger({
+            businessId,
+            customerId: customer._id,
+            branchId: bill.branchId,
+            type: 'reverse',
+            amountPaise: walletPayment.amountPaise,
+            billId: bill._id,
+            reason: `Bill ${bill.invoiceNo} cancellation`,
+            balanceAfterPaise: customer.walletBalancePaise + walletPayment.amountPaise,
+          }).save({ session });
+        }
+
+        // Revert sold wallet top-up if any
+        for (const l of bill.lines) {
+          if (l.kind === 'wallet_topup') {
+            const plan = await Plan.findOne({ _id: l.refId, businessId }).session(session);
+            const creditPaise = plan?.walletOffer?.creditPaise || l.unitPricePaise;
+            if (customer) {
+              if (customer.walletBalancePaise < creditPaise) {
+                throw new AppError(422, ErrorCode.INVALID_TRANSITION, 'Wallet credit from this bill has already been spent');
+              }
+              await Customer.updateOne(
+                { _id: customer._id, businessId, walletBalancePaise: { $gte: creditPaise } },
+                { $inc: { walletBalancePaise: -creditPaise } },
+                { session }
+              );
+              customer.walletBalancePaise -= creditPaise;
+
+              await new WalletLedger({
+                businessId,
+                customerId: customer._id,
+                branchId: bill.branchId,
+                type: 'adjust',
+                amountPaise: -creditPaise,
+                billId: bill._id,
+                reason: `Reversal of wallet top-up from cancelled bill ${bill.invoiceNo}`,
+                balanceAfterPaise: customer.walletBalancePaise,
+              }).save({ session });
+            }
+          }
+        }
+
+        // Revert customer visit stats
+        if (customer) {
+          await Customer.updateOne(
+            { _id: customer._id, businessId },
+            {
+              $inc: {
+                'stats.visits': -1,
+                'stats.spendPaise': -bill.totals.totalPaise,
+              },
+            },
+            { session }
+          );
+        }
+
+        // Cancel sold customer plans
+        for (const sp of soldPlans) {
+          sp.status = 'cancelled';
+          await sp.save({ session });
+        }
+
+        // Reverse stock movements
+        for (const l of bill.lines) {
+          if (l.kind === 'product') {
             await new StockMovement({
               businessId,
               branchId: bill.branchId,
-              productId: c.productId,
-              pool: 'consumable',
+              productId: l.refId,
+              pool: 'retail',
               type: 'cancel_reverse',
-              qty: c.qty,
+              qty: l.qty,
               costPaise: 0,
               refType: 'bill',
               refId: bill._id,
@@ -1020,19 +1220,93 @@ export class BillingService {
             }).save({ session });
 
             await StockBalance.findOneAndUpdate(
-              { businessId, branchId: bill.branchId, productId: c.productId, pool: 'consumable' },
-              { $inc: { qty: c.qty }, $set: { lastMovementAt: new Date() } },
+              { businessId, branchId: bill.branchId, productId: l.refId, pool: 'retail' },
+              { $inc: { qty: l.qty }, $set: { lastMovementAt: new Date() } },
               { upsert: true, session }
             );
+          } else if (l.kind === 'service' && l.consumablesUsed) {
+            for (const c of l.consumablesUsed) {
+              await new StockMovement({
+                businessId,
+                branchId: bill.branchId,
+                productId: c.productId,
+                pool: 'consumable',
+                type: 'cancel_reverse',
+                qty: c.qty,
+                costPaise: 0,
+                refType: 'bill',
+                refId: bill._id,
+                businessDate: bill.businessDate,
+              }).save({ session });
+
+              await StockBalance.findOneAndUpdate(
+                { businessId, branchId: bill.branchId, productId: c.productId, pool: 'consumable' },
+                { $inc: { qty: c.qty }, $set: { lastMovementAt: new Date() } },
+                { upsert: true, session }
+              );
+            }
           }
         }
-      }
 
-      // Void dues
-      await Due.updateMany({ businessId, billId: bill._id }, { $set: { status: 'void' } }, { session });
-      if (customer && bill.totals.duePaise > 0) {
-        customer.duePaise = Math.max(0, customer.duePaise - bill.totals.duePaise);
-        await customer.save({ session });
+        // Void dues
+        await Due.updateMany({ businessId, billId: bill._id }, { $set: { status: 'void' } }, { session });
+        if (customer && bill.totals.duePaise > 0) {
+          await Customer.updateOne(
+            { _id: customer._id, businessId },
+            { $inc: { duePaise: -bill.totals.duePaise } },
+            { session }
+          );
+        }
+
+        // Reverse loyalty points
+        const earnedLedger = await LoyaltyLedger.findOne({ businessId, billId: bill._id, type: 'earn' }).session(session);
+        if (earnedLedger && customer) {
+          await Customer.updateOne(
+            { _id: customer._id, businessId },
+            { $inc: { loyaltyPoints: -earnedLedger.points } },
+            { session }
+          );
+        }
+        const redeemedLedger = await LoyaltyLedger.findOne({ businessId, billId: bill._id, type: 'redeem' }).session(session);
+        if (redeemedLedger && customer) {
+          const restoredPoints = Math.abs(redeemedLedger.points);
+          await Customer.updateOne(
+            { _id: customer._id, businessId },
+            { $inc: { loyaltyPoints: restoredPoints } },
+            { session }
+          );
+          await new LoyaltyLedger({
+            businessId,
+            customerId: customer._id,
+            type: 'earn',
+            points: restoredPoints,
+            billId: bill._id,
+            reason: `Bill ${bill.invoiceNo} cancellation`,
+            balanceAfter: (customer.loyaltyPoints || 0) + restoredPoints,
+          }).save({ session });
+        }
+
+        // Revert DailySummary counts & collections
+        const summaryId = `${bill.branchId.toString()}:${bill.businessDate}`;
+        const collectionsDec: Record<string, number> = {};
+        for (const p of bill.payments || []) {
+          collectionsDec[`collections.${p.mode}`] = -(p.amountPaise || 0);
+        }
+        await DailySummary.findByIdAndUpdate(
+          summaryId,
+          {
+            $inc: {
+              'counts.bills': -1,
+              'counts.cancelled': 1,
+              'sales.grossPaise': -bill.totals.grossPaise,
+              'sales.discountPaise': -bill.totals.discountPaise,
+              'sales.netPaise': -bill.totals.taxablePaise,
+              'sales.taxPaise': -(bill.totals.cgstPaise + bill.totals.sgstPaise),
+              ...collectionsDec,
+            },
+          },
+          { session }
+        );
       }
 
       // Update bill record
@@ -1043,23 +1317,6 @@ export class BillingService {
         reason,
       };
       await bill.save({ session });
-
-      // Revert DailySummary counts
-      const summaryId = `${bill.branchId.toString()}:${bill.businessDate}`;
-      await DailySummary.findByIdAndUpdate(
-        summaryId,
-        {
-          $inc: {
-            'counts.bills': -1,
-            'counts.cancelled': 1,
-            'sales.grossPaise': -bill.totals.grossPaise,
-            'sales.discountPaise': -bill.totals.discountPaise,
-            'sales.netPaise': -bill.totals.taxablePaise,
-            'sales.taxPaise': -(bill.totals.cgstPaise + bill.totals.sgstPaise),
-          },
-        },
-        { session }
-      );
 
       await auditService.logAction({
         ctx,
@@ -1096,6 +1353,16 @@ export class BillingService {
       const bill = await Bill.findOne({ _id: billId, businessId }).session(session);
       if (!bill) throw new AppError(404, 'NOT_FOUND', 'Bill not found');
 
+      if (ctx.role === 'branch' && ctx.branchId && ctx.branchId !== bill.branchId.toString()) {
+        throw new AppError(403, 'FORBIDDEN', 'Access to bill of another branch is forbidden');
+      }
+      if (ctx.role === 'manager' && ctx.branchIds && !ctx.branchIds.some((bId) => bId.toString() === bill.branchId.toString())) {
+        throw new AppError(403, 'FORBIDDEN', 'Access to bill of unassigned branch is forbidden');
+      }
+
+      if (bill.status === 'awaiting_approval') {
+        throw new AppError(422, 'INVALID_TRANSITION', 'Cannot refund a bill awaiting approval');
+      }
       if (bill.status === 'cancelled' || bill.status === 'rejected') {
         throw new AppError(422, 'INVALID_TRANSITION', 'Cannot refund a cancelled or rejected bill');
       }
@@ -1161,6 +1428,29 @@ export class BillingService {
       const bill = await Bill.findOne({ _id: billId, businessId }).session(session);
       if (!bill) throw new AppError(404, 'NOT_FOUND', 'Bill not found');
 
+      if (ctx.role === 'branch' && ctx.branchId && ctx.branchId !== bill.branchId.toString()) {
+        throw new AppError(403, 'FORBIDDEN', 'Access to bill of another branch is forbidden');
+      }
+      if (ctx.role === 'manager' && ctx.branchIds && !ctx.branchIds.some((bId) => bId.toString() === bill.branchId.toString())) {
+        throw new AppError(403, 'FORBIDDEN', 'Access to bill of unassigned branch is forbidden');
+      }
+
+      if (bill.status === 'cancelled' || bill.status === 'rejected') {
+        throw new AppError(422, 'INVALID_TRANSITION', 'Cannot edit a cancelled or rejected bill');
+      }
+
+      // Check locked payroll month
+      const month = bill.businessDate.slice(0, 7);
+      const lockedRun = await PayrollRun.findOne({
+        businessId,
+        branchId: bill.branchId,
+        month,
+        status: { $in: ['locked', 'paid'] },
+      }).session(session);
+      if (lockedRun) {
+        throw new AppError(409, 'INVALID_TRANSITION', 'Bills in a locked payroll month cannot be edited');
+      }
+
       // Optimistic concurrency check
       if (updates.__v !== undefined && bill.__v !== updates.__v) {
         throw new AppError(409, 'VERSION_CONFLICT', 'Bill was modified by another user');
@@ -1183,29 +1473,128 @@ export class BillingService {
       });
       await versionDoc.save({ session });
 
-      // Reverse current version's effects
-      // (Similar to cancel reversals)
-      // Then recompute
+      // Reverse current version's stock
+      for (const l of bill.lines) {
+        if (l.kind === 'product') {
+          await new StockMovement({
+            businessId,
+            branchId: bill.branchId,
+            productId: l.refId,
+            pool: 'retail',
+            type: 'cancel_reverse',
+            qty: l.qty,
+            costPaise: 0,
+            refType: 'bill',
+            refId: bill._id,
+            businessDate: bill.businessDate,
+          }).save({ session });
+
+          await StockBalance.findOneAndUpdate(
+            { businessId, branchId: bill.branchId, productId: l.refId, pool: 'retail' },
+            { $inc: { qty: l.qty }, $set: { lastMovementAt: new Date() } },
+            { upsert: true, session }
+          );
+        } else if (l.kind === 'service' && l.consumablesUsed) {
+          for (const c of l.consumablesUsed) {
+            await new StockMovement({
+              businessId,
+              branchId: bill.branchId,
+              productId: c.productId,
+              pool: 'consumable',
+              type: 'cancel_reverse',
+              qty: c.qty,
+              costPaise: 0,
+              refType: 'bill',
+              refId: bill._id,
+              businessDate: bill.businessDate,
+            }).save({ session });
+
+            await StockBalance.findOneAndUpdate(
+              { businessId, branchId: bill.branchId, productId: c.productId, pool: 'consumable' },
+              { $inc: { qty: c.qty }, $set: { lastMovementAt: new Date() } },
+              { upsert: true, session }
+            );
+          }
+        }
+      }
+
+      // Recompute bill
       const inputLines = await this.resolveInputLines(businessId, bill.branchId, updates.lines, session);
       const business = await Business.findById(businessId).session(session);
 
+      const rawPayments = (updates.payments !== undefined && updates.payments !== null) ? updates.payments : bill.payments;
+
       const computed = computeBill({
         lines: inputLines,
-        billDiscount: updates.billDiscount,
-        redemptions: updates.redemptions || [],
-        tips: updates.tips || [],
-        payments: updates.payments || [],
+        billDiscount: updates.billDiscount !== undefined ? updates.billDiscount : bill.billDiscount,
+        redemptions: updates.redemptions || bill.redemptions || [],
+        tips: updates.tips || bill.tips || [],
+        payments: rawPayments || [],
         gstApplied: business!.gst.enabled,
         businessGstBps: business!.gst.rateBps || 1800,
       });
 
+      // Apply new stock
+      for (const l of computed.lines) {
+        if (l.kind === 'product') {
+          await new StockMovement({
+            businessId,
+            branchId: bill.branchId,
+            productId: l.refId,
+            pool: 'retail',
+            type: 'sale',
+            qty: -l.qty,
+            costPaise: 0,
+            refType: 'bill',
+            refId: bill._id,
+            businessDate: bill.businessDate,
+          }).save({ session });
+
+          await StockBalance.findOneAndUpdate(
+            { businessId, branchId: bill.branchId, productId: l.refId, pool: 'retail' },
+            { $inc: { qty: -l.qty }, $set: { lastMovementAt: new Date() } },
+            { upsert: true, session }
+          );
+        } else if (l.kind === 'service' && l.consumablesUsed) {
+          for (const c of l.consumablesUsed) {
+            await new StockMovement({
+              businessId,
+              branchId: bill.branchId,
+              productId: c.productId,
+              pool: 'consumable',
+              type: 'service_use',
+              qty: -c.qty,
+              costPaise: c.costPaise || 0,
+              refType: 'bill',
+              refId: bill._id,
+              businessDate: bill.businessDate,
+            }).save({ session });
+
+            await StockBalance.findOneAndUpdate(
+              { businessId, branchId: bill.branchId, productId: c.productId, pool: 'consumable' },
+              { $inc: { qty: -c.qty }, $set: { lastMovementAt: new Date() } },
+              { upsert: true, session }
+            );
+          }
+        }
+      }
+
       bill.lines = computed.lines as any;
-      bill.billDiscount = updates.billDiscount;
+      bill.billDiscount = updates.billDiscount !== undefined ? updates.billDiscount : bill.billDiscount;
       bill.totals = computed.totals;
-      bill.payments = updates.payments || bill.payments;
-      bill.tips = updates.tips || bill.tips;
+
+      bill.payments = (rawPayments || []).map((p: any) => ({
+        mode: p.mode,
+        amountPaise: p.amountPaise,
+        businessDate: p.businessDate || bill.businessDate,
+        tenderedPaise: p.tenderedPaise,
+        ref: p.ref,
+        at: p.at ? new Date(p.at) : new Date(),
+      }));
+
+      bill.tips = updates.tips !== undefined ? updates.tips : bill.tips;
       bill.version += 1;
-      bill.__v += 1;
+      // Do NOT increment bill.__v manually
 
       await bill.save({ session });
 
@@ -1216,6 +1605,8 @@ export class BillingService {
         entityId: bill._id,
         branchId: bill.branchId,
         reason: updates.reason,
+        before: versionDoc.snapshot,
+        after: bill.toObject(),
         session,
       });
 
@@ -1248,6 +1639,10 @@ export class BillingService {
 
       // Find open dues, oldest first
       const openDues = await Due.find({ businessId, customerId, status: 'open' }).sort({ createdAt: 1 }).session(session);
+      const totalOpenDues = openDues.reduce((acc, d) => acc + (d.amountPaise - d.settledPaise), 0);
+      if (totalPaid > totalOpenDues) {
+        throw new AppError(422, 'VALIDATION_ERROR', `Payment amount (${totalPaid}) exceeds total outstanding dues (${totalOpenDues})`);
+      }
       const allocations: any[] = [];
 
       for (const due of openDues) {
@@ -1331,8 +1726,15 @@ export class BillingService {
     const bill = await Bill.findOne({ _id: toObjectId(id), businessId });
     if (!bill) throw new AppError(404, 'NOT_FOUND', 'Bill not found');
 
+    if (ctx.role === 'branch' && ctx.branchId && ctx.branchId !== bill.branchId.toString()) {
+      throw new AppError(403, 'FORBIDDEN', 'Access to bill of another branch is forbidden');
+    }
+    if (ctx.role === 'manager' && ctx.branchIds && !ctx.branchIds.some((bId) => bId.toString() === bill.branchId.toString())) {
+      throw new AppError(403, 'FORBIDDEN', 'Access to bill of unassigned branch is forbidden');
+    }
+
     const versions = await BillVersion.find({ businessId, billId: bill._id }).sort({ version: -1 });
-    return { bill, versions };
+    return { ...bill.toObject(), bill: bill.toObject(), versions };
   }
 
   async getApprovals(ctx: RequestContext, branchIdStr?: string): Promise<IBill[]> {
@@ -1353,7 +1755,11 @@ export class BillingService {
       businessId: toObjectId(ctx.businessId!),
       customerId: toObjectId(customerId),
       status: 'open',
-    }).populate('billId', 'invoiceNo businessDate');
+    }).populate({
+      path: 'billId',
+      select: 'invoiceNo businessDate',
+      options: { skipTenantScope: true },
+    });
   }
 }
 

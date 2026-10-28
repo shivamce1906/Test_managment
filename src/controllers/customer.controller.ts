@@ -39,8 +39,8 @@ export class CustomerController {
 
   public mergeCustomers = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const { duplicateId, primaryId } = req.body;
-      const result = await this.customerService.mergeCustomers(req.ctx, duplicateId, primaryId);
+      const { primaryId, duplicateId } = req.body;
+      const result = await this.customerService.mergeCustomers(req.ctx, primaryId, duplicateId);
       res.json(result);
     } catch (err) {
       next(err);

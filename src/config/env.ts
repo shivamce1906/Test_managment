@@ -28,7 +28,7 @@ export const env = {
   PORT: Number(process.env.PORT) || 4000,
   // Standalone MongoDB default URI (For Replica Set, use: mongodb://localhost:27017/glox_salon?replicaSet=rs0)
   MONGODB_URI: process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/glox_salon',
-  MONGO_URI: process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/glox_salon',
+  // MONGO_URI: process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/glox_salon',
   REDIS_URL: process.env.REDIS_URL || 'redis://localhost:6379',
   JWT_SECRET: process.env.JWT_SECRET || 'super-secret-jwt-key-min-32-chars-long-glox-salon-2026',
   JWT_ACCESS_TTL: process.env.JWT_ACCESS_TTL || '15m',

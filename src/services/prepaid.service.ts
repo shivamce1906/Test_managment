@@ -127,7 +127,7 @@ export async function extendCustomerPlan(
   }
 
   if (plan.status === 'cancelled' || plan.status === 'transferred') {
-    throw new AppError(400, ErrorCode.INVALID_STATE_TRANSITION, `Cannot extend ${plan.status} plan`);
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, `Cannot extend ${plan.status} plan`);
   }
 
   const before = plan.toObject();
@@ -185,7 +185,7 @@ export async function freezeCustomerPlan(
   }
 
   if (plan.status !== 'active') {
-    throw new AppError(400, ErrorCode.INVALID_STATE_TRANSITION, 'Only active plans can be frozen');
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, 'Only active plans can be frozen');
   }
 
   const before = plan.toObject();
@@ -229,7 +229,7 @@ export async function unfreezeCustomerPlan(
   }
 
   if (plan.status !== 'frozen') {
-    throw new AppError(400, ErrorCode.INVALID_STATE_TRANSITION, 'Only frozen plans can be unfrozen');
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, 'Only frozen plans can be unfrozen');
   }
 
   const before = plan.toObject();
@@ -289,7 +289,7 @@ export async function transferCustomerPlan(
   }
 
   if (plan.status !== 'active') {
-    throw new AppError(400, ErrorCode.INVALID_STATE_TRANSITION, 'Only active plans can be transferred');
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, 'Only active plans can be transferred');
   }
 
   if (plan.customerId.toString() === toCustomerId.toString()) {
@@ -403,7 +403,7 @@ export async function adjustWallet(
 
     const newBalance = customer.walletBalancePaise + amountPaise;
     if (newBalance < 0) {
-      throw new AppError(400, ErrorCode.INSUFFICIENT_WALLET_BALANCE, 'Wallet balance cannot be negative');
+      throw new AppError(422, ErrorCode.INSUFFICIENT_WALLET_BALANCE, 'Wallet balance cannot be negative');
     }
 
     customer.walletBalancePaise = newBalance;
@@ -472,7 +472,7 @@ export async function lookupVoucher(
   const voucher = await CustomerPlan.findOne({
     businessId: toObjectId(ctx.businessId),
     voucherCode: code.toUpperCase().trim(),
-  }).populate('customerId');
+  }).populate({ path: 'customerId', options: { skipTenantScope: true } });
 
   if (!voucher) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Voucher not found');

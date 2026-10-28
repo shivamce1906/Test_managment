@@ -10,6 +10,7 @@ import {
   updateManagerSchema,
 } from '../validations';
 import { BusinessController } from '../controllers/business.controller';
+import { authService } from '../services';
 
 export const businessRouter = Router();
 
@@ -32,3 +33,13 @@ businessRouter.get('/managers', requireRole('owner'), BusinessController.getMana
 // 4. Branch Logins
 businessRouter.get('/branch-logins', requireRole('owner'), BusinessController.getBranchLogins);
 businessRouter.patch('/branch-logins/:id', requireRole('owner'), BusinessController.updateBranchLoginFlags);
+
+// 5. Password Management
+businessRouter.post('/users/:id/password', requireRole('owner'), async (req, res, next) => {
+  try {
+    await authService.setPassword(req.ctx, req.params.id, req.body.password);
+    res.status(200).json({ success: true, message: 'Password updated successfully' });
+  } catch (err) {
+    next(err);
+  }
+});

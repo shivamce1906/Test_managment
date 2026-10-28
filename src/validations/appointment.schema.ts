@@ -51,4 +51,6 @@ export const createStaffBlockSchema = z.object({
   start: z.string().datetime(),
   end: z.string().datetime(),
   reason: z.string().min(1, 'Reason is required'),
+}).refine((b) => new Date(b.end) > new Date(b.start), {
+  message: 'end must be after start',
 });

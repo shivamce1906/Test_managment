@@ -14,7 +14,11 @@ export function requirePermission(flag: UserPermissionFlag) {
       return next(new AppError(401, ErrorCode.UNAUTHENTICATED, 'Authentication required'));
     }
 
-    if (req.ctx.role === 'super_admin' || req.ctx.role === 'owner') {
+    if (
+      req.ctx.role === 'super_admin' ||
+      req.ctx.role === 'owner' ||
+      (req.ctx.role === 'manager' && flag === 'markAttendance')
+    ) {
       return next();
     }
 

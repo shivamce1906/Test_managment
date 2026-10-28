@@ -8,6 +8,7 @@ import {
   updateBusinessSchema,
 } from '../validations';
 import { AdminController } from '../controllers/admin.controller';
+import { authService } from '../services';
 
 export const adminRouter = Router();
 
@@ -34,3 +35,13 @@ adminRouter.get('/businesses/:id/import-jobs', AdminController.getImportJobs);
 
 // 5. Audit Log Inspection
 adminRouter.get('/audit-logs', AdminController.getAuditLogs);
+
+// 6. User Management
+adminRouter.post('/users/:id/password', async (req, res, next) => {
+  try {
+    await authService.setPassword(req.ctx, req.params.id, req.body.password);
+    res.status(200).json({ success: true, message: 'Password updated successfully' });
+  } catch (err) {
+    next(err);
+  }
+});

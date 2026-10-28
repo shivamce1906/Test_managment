@@ -26,6 +26,7 @@ export function maskEmail(email?: string): string {
  * Normalises phone numbers to standard E.164 +91XXXXXXXXXX format.
  */
 export function normalizePhone(phone: string): string {
+  if (!phone || typeof phone !== 'string') return '';
   const digits = phone.replace(/\D/g, '');
   if (digits.length === 10) {
     return `+91${digits}`;
@@ -36,5 +37,5 @@ export function normalizePhone(phone: string): string {
   if (digits.length === 11 && digits.startsWith('0')) {
     return `+91${digits.slice(1)}`;
   }
-  return `+${digits}`;
+  return phone;
 }

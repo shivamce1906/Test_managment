@@ -71,6 +71,24 @@ export class AppointmentController {
       next(err);
     }
   };
+
+  public rescheduleAppointment = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const result = await this.appointmentService.rescheduleAppointment(req.ctx, req.params.id, req.body);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  public getBranchAvailability = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const result = await this.appointmentService.getBranchAvailability(req.ctx, req.params.branchId, req.query as any);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
 }
 
 export const appointmentController = new AppointmentController();

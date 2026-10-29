@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { addressSchema, objectIdSchema } from './common.schema';
+import { addressSchema, objectIdSchema, paginationQuerySchema } from './common.schema';
 
 export const createBusinessSchema = z.object({
   business: z.object({
@@ -13,6 +13,9 @@ export const createBusinessSchema = z.object({
       rateBps: z.number().int().nonnegative().default(1800),
       sac: z.string().default('9983'),
       pricesInclusive: z.boolean().default(false),
+    }).refine((gst) => !gst.enabled || !!gst.gstin?.trim(), {
+      message: 'GSTIN is required when GST is enabled',
+      path: ['gstin'],
     }),
     fyStartMonth: z.number().int().min(1).max(12).default(4),
     discountLimits: z.object({
@@ -121,7 +124,24 @@ export const updateBranchSchema = z.object({
   pettyCashFloatPaise: z.number().int().nonnegative().optional(),
 });
 
-export const updateBusinessSchema = updateBusinessSettingsSchema;
+// Super Admin can also suspend/reactivate; suspending revokes every session in the business.
+export const updateBusinessSchema = updateBusinessSettingsSchema.extend({
+  status: z.enum(['active', 'suspended']).optional(),
+});
+
+export const adminListBusinessesQuerySchema = paginationQuerySchema.pick({ page: true, limit: true, q: true }).extend({
+  status: z.enum(['active', 'suspended']).optional(),
+});
+
+export const adminBusinessUsersQuerySchema = z.object({
+  role: z.enum(['owner', 'manager', 'branch']).optional(),
+});
+
+export const adminUserStatusSchema = z.object({
+  status: z.enum(['active', 'inactive']),
+});
+
+export const idParamSchema = z.object({ id: objectIdSchema });
 
 export const branchRequestSchema = z.object({
   type: z.enum(['add', 'delete']),
@@ -141,6 +161,13 @@ export const approveBranchRequestSchema = z.object({
   phone: z.string().optional(),
   loginEmail: z.string().optional(),
   loginPassword: z.string().optional(),
+});
+
+// POST /admin/branch-requests/:id/decide — `note` carries the reject reason or, for an approved
+// 'add' request, the new branch's code, invoicePrefix, phone, loginEmail and loginPassword.
+export const decideBranchRequestSchema = z.object({
+  decision: z.enum(['approve', 'reject']),
+  note: z.record(z.any()).optional(),
 });
 
 export const rejectBranchRequestSchema = z.object({

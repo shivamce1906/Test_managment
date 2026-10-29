@@ -16,6 +16,8 @@ async function bootstrap() {
 
     let redis = getRedisClient();
     try {
+      // The client is lazyConnect with no offline queue, so ping() fails until connect() is called.
+      if (redis.status === 'wait') await redis.connect();
       await redis.ping();
       logger.info('Redis connected successfully');
     } catch {

@@ -302,18 +302,20 @@ Owner and Manager look like their login `user` object.
 
 ## 4. Super Admin — account setup endpoints
 
+> ✅ **Updated 2026-10-28:** all of these now work. The current request/response details for the whole Super Admin panel are in **[SUPERADMIN_API_GUIDE.md](SUPERADMIN_API_GUIDE.md)**, which supersedes 4.1–4.5 below (they describe the old, broken behaviour).
+
 All require a **Super Admin** access token. Owners/managers get `403 FORBIDDEN`.
 
 | Method | Path | Purpose | Status |
 | --- | --- | --- | --- |
-| POST | `/admin/businesses` | Onboard business + owner + head branch + branch login | ❌ fails (400) |
-| PATCH | `/admin/businesses/:id` | Update business / suspend | ✅ (suspend does not log users out ⚠️) |
-| POST | `/admin/businesses/:id/branches` | Add branch + its branch login | ❌ fails (400) |
+| POST | `/admin/businesses` | Onboard business + owner + head branch + branch login | ✅ fixed |
+| PATCH | `/admin/businesses/:id` | Update business / suspend | ✅ fixed (suspend now logs users out) |
+| POST | `/admin/businesses/:id/branches` | Add branch + its branch login | ✅ fixed |
 | PATCH | `/admin/businesses/:id/branches/:branchId/deactivate` | Deactivate branch (+ its login) | ✅ |
 | GET | `/admin/branch-requests` | Owner requests waiting | ✅ |
-| POST | `/admin/branch-requests/:id/decide` | Approve / reject a request | ✅ reject & delete-approve · ❌ add-approve |
-| POST | `/admin/users/:id/password` | Reset any password | ❌ does not exist |
-| POST | `/admin/users/:id/status` | Activate / deactivate a login | ❌ does not exist |
+| POST | `/admin/branch-requests/:id/decide` | Approve / reject a request | ✅ fixed |
+| POST | `/admin/users/:id/password` | Reset any password | ✅ new |
+| POST | `/admin/users/:id/status` | Activate / deactivate a login | ✅ new |
 | — | Create a Super Admin | — | ❌ no API (seed in DB) |
 
 ### 4.1 `POST /admin/businesses` — onboard a salon ❌
@@ -769,10 +771,10 @@ Ordered by how much they block the frontend. ❌ = feature unusable, ⚠️ = wo
 
 | # | Issue | Impact on frontend | Where | Fix |
 | --- | --- | --- | --- | --- |
-| 1 | ❌ Creating any login fails: email registry gets `accountId` but the model requires `userId` | Super Admin cannot onboard salons or add branches; owner cannot create managers | [business.service.ts:124](../src/services/business.service.ts#L124) (also branch & manager create) | Write `userId` (or rename the model field to `accountId` as in the DB design) |
-| 2 | ❌ Failed onboarding leaves half-created business/branch/users (transactions disabled) | Retrying creates duplicates | [db.ts:59](../src/config/db.ts#L59) | Re-enable `session.withTransaction` (needs replica set) |
+| 1 | ✅ **Fixed 2026-10-28.** ~~Creating any login fails: email registry gets `accountId` but the model requires `userId`~~ | Super Admin cannot onboard salons or add branches; owner cannot create managers | [business.service.ts:124](../src/services/business.service.ts#L124) (also branch & manager create) | Write `userId` (or rename the model field to `accountId` as in the DB design) |
+| 2 | ✅ **Fixed 2026-10-28** (on replica sets/Atlas). ~~Failed onboarding leaves half-created business/branch/users (transactions disabled)~~ | Retrying creates duplicates | [db.ts:59](../src/config/db.ts#L59) | Re-enable `session.withTransaction` (needs replica set) |
 | 3 | ❌ Router middleware leaks: `payrollRouter.use(requireRole(...))` and `auditRouter.use(...)` run for every later route | Branch logins get 403 on stock, day-end, inbox, notifications; managers get 403 on notifications; Super Admin gets 403 on unknown `/admin/*` paths | [payroll.routes.ts:15](../src/routes/payroll.routes.ts#L15), [audit.routes.ts:8](../src/routes/audit.routes.ts#L8) | Mount each router on its own prefix or put guards on each route |
-| 4 | ❌ No password set/reset endpoints; `setPassword` checks `'superadmin'` but the middleware sets `'super_admin'` | No "reset password" feature for any role | [auth.service.ts:323](../src/services/auth.service.ts#L323) | Add `POST /business/users/:id/password` and `POST /admin/users/:id/password`; fix role string |
+| 4 | ⚠️ Super Admin part fixed 2026-10-28 (`POST /admin/users/:id/password`); owner endpoint still missing. No password set/reset endpoints; `setPassword` checks `'superadmin'` but the middleware sets `'super_admin'` | No "reset password" feature for any role | [auth.service.ts:323](../src/services/auth.service.ts#L323) | Add `POST /business/users/:id/password` and `POST /admin/users/:id/password`; fix role string |
 | 5 | ⚠️ `passwordHash` returned by `PATCH /business/managers/:id` and `PATCH /business/branch-logins/:id` | Security leak in browser devtools/logs | business.service.ts `updateManager`, `updateBranchLoginFlags` | Add a `toJSON` transform on the User schema that removes `passwordHash` |
 | 6 | ⚠️ Forged refresh token `<anyUserId>.x.y` logs that user out everywhere | Anyone can force-logout any user | [auth.service.ts:87](../src/services/auth.service.ts#L87) | Only revoke when the token id exists in a "used tokens" set, or verify a signature first |
 | 7 | ⚠️ Suspending a business / deactivating a branch does not block live access tokens | Users keep working ≤ 15 min and refresh keeps succeeding for suspended businesses | auth.middleware.ts | Check business/branch status in `authenticate` (cache in Redis) and on refresh |
@@ -784,7 +786,7 @@ Ordered by how much they block the frontend. ❌ = feature unusable, ⚠️ = wo
 | 13 | ⚠️ Login rate limit 30/15 min, SRS says 5/min | None for UI; weaker brute-force protection | rateLimiter.ts | Align limits; use Redis store for multiple servers |
 | 14 | ⚠️ CORS allows any origin (`origin: true`) | None for UI; security | [app.ts:34](../src/app.ts#L34) | Use `env.APP_ORIGINS` |
 | 15 | ⚠️ No `/api/v1` prefix | Base URL will change later | app.ts | Mount all routers under `/api/v1` |
-| 16 | ⚠️ `decide` treats any value except `"reject"` as approve | Typos approve requests | admin.controller.ts | Validate `decision` with Zod enum |
+| 16 | ✅ **Fixed 2026-10-28.** ~~`decide` treats any value except `"reject"` as approve~~ | Typos approve requests | admin.controller.ts | Validate `decision` with Zod enum |
 
 **Safe to build now:** login screen, refresh/logout handling, session restore, role routing, managers list/edit, branch list, branch-login list, branch requests, Super Admin requests/deactivate.
-**Wait for fixes:** onboarding (#1, #2), create manager (#1), password reset (#4), branch login screens beyond billing/calendar (#3).
+**Wait for fixes:** owner password reset (#4), branch login screens beyond billing/calendar (#3). Onboarding, create manager and Super Admin password reset now work.

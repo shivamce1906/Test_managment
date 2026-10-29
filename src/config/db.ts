@@ -2,6 +2,7 @@ import mongoose, { ClientSession } from 'mongoose';
 import { logger } from '../utils/logger';
 
 let isConnected = false;
+let transactionsSupported: boolean | undefined;
 
 export async function connectDb(uri: string) {
   const mongoUri = uri;
@@ -15,22 +16,8 @@ export async function connectDb(uri: string) {
       autoIndex: false,
       serverSelectionTimeoutMS: 30000,
     });
-    logger.info('MongoDB connected successfully (Normal Standalone Mode)');
+    logger.info('MongoDB connected successfully');
     isConnected = true;
-
-    /*
-    // =========================================================================
-    // REPLICA SET TOPOLOGY CHECK (Uncomment when deploying to a Replica Set cluster)
-    // =========================================================================
-    // const adminDb = mongoose.connection.db?.admin();
-    // if (adminDb) {
-    //   const hello = await adminDb.command({ hello: 1 });
-    //   if (hello.setName || hello.hosts) {
-    //     logger.info({ replicaSet: hello.setName }, '✅ MongoDB Replica Set active with transaction support');
-    //   }
-    // }
-    // =========================================================================
-    */
 
     return mongoose.connection;
   } catch (error) {
@@ -44,13 +31,26 @@ export async function disconnectDb(): Promise<void> {
     await mongoose.disconnect();
   }
   isConnected = false;
+  transactionsSupported = undefined;
   logger.info('MongoDB disconnected');
 }
 
 /**
- * Executes a MongoDB database operation.
- * Active Mode: Normal standalone MongoDB (runs smoothly without replica set requirement).
- * Replica Mode: Multi-document ACID transactions preserved below (uncomment for replica clusters/Atlas).
+ * Multi-document transactions need a replica set or sharded cluster (Atlas is one).
+ * Checked once per connection so a plain standalone mongod keeps working without them.
+ */
+async function supportsTransactions(): Promise<boolean> {
+  if (transactionsSupported === undefined) {
+    const hello = await mongoose.connection.db!.admin().command({ hello: 1 });
+    transactionsSupported = Boolean(hello.setName) || hello.msg === 'isdbgrid';
+    logger.info({ transactionsSupported }, 'MongoDB transaction support detected');
+  }
+  return transactionsSupported;
+}
+
+/**
+ * Runs fn inside a transaction when the deployment supports it (replica set / Atlas),
+ * otherwise runs it with a plain session (standalone mongod, no atomicity).
  */
 export async function withTransaction<T>(
   fn: (session: ClientSession) => Promise<T>,
@@ -63,31 +63,23 @@ export async function withTransaction<T>(
   const session = await mongoose.startSession();
 
   try {
-    /*
-    // =========================================================================
-    // REPLICA SET TRANSACTION CODE (PRESERVED)
-    // Uncomment this block when deploying to a MongoDB Replica Set or MongoDB Atlas:
-    // =========================================================================
-    // let result!: T;
-    // await session.withTransaction(
-    //   async () => {
-    //     result = await fn(session);
-    //   },
-    //   {
-    //     readPreference: 'primary',
-    //     readConcern: { level: 'majority' },
-    //     writeConcern: { w: 'majority' },
-    //   }
-    // );
-    // return result;
-    // =========================================================================
-    */
+    if (!(await supportsTransactions())) {
+      return await fn(session);
+    }
 
-    // NORMAL STANDALONE MONGODB EXECUTION
-    // Runs cleanly and smoothly on any standard single-node or local MongoDB installation:
-    return await fn(session);
+    let result!: T;
+    await session.withTransaction(
+      async () => {
+        result = await fn(session);
+      },
+      {
+        readPreference: 'primary',
+        readConcern: { level: 'majority' },
+        writeConcern: { w: 'majority' },
+      }
+    );
+    return result;
   } finally {
     await session.endSession();
   }
 }
-

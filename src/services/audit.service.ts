@@ -85,6 +85,7 @@ export async function queryAuditLogs(
     action?: string;
     entity?: string;
     entityId?: string;
+    businessId?: string; // Super Admin only
     page?: number;
     limit?: number;
   }
@@ -92,8 +93,12 @@ export async function queryAuditLogs(
   const query: any = {};
 
   if (ctx.role === 'superadmin' || ctx.role === 'super_admin') {
-    if (ctx.businessId) {
-      query.businessId = toObjectId(ctx.businessId);
+    const businessId = filters.businessId || ctx.businessId;
+    if (businessId) {
+      if (!Types.ObjectId.isValid(businessId)) {
+        throw new AppError(400, 'VALIDATION_ERROR', 'Invalid businessId');
+      }
+      query.businessId = toObjectId(businessId);
     }
   } else {
     if (!ctx.businessId) {

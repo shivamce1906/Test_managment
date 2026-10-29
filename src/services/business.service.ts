@@ -11,9 +11,24 @@ import {
   IUser,
 } from '../models';
 import { AppError, hashPassword } from '../utils';
+import { createBranchSchema } from '../validations';
 import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
 import { authService } from './auth.service';
+
+/** A user as plain JSON with the password hash removed, safe to return from the API. */
+export type SafeUser = Record<string, any>;
+
+function toSafeUser(user: IUser): SafeUser {
+  const { passwordHash, ...rest } = user.toObject();
+  return rest;
+}
+
+const skipScope = { skipTenantScope: true };
+
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export class BusinessService {
   /**
@@ -31,7 +46,7 @@ export class BusinessService {
       loginEmail: string;
       loginPassword: string;
     };
-  }): Promise<{ business: IBusiness; owner: IUser; branch: IBranch; branchLogin: IUser }> {
+  }): Promise<{ business: IBusiness; owner: SafeUser; branch: IBranch; branchLogin: SafeUser }> {
     const ownerEmail = data.owner.email.trim().toLowerCase();
     const branchEmail = data.headBranch.loginEmail.trim().toLowerCase();
 
@@ -121,13 +136,13 @@ export class BusinessService {
       // 5. Reserve Emails in EmailRegistry
       await EmailRegistry.insertMany(
         [
-          { _id: ownerEmail, kind: 'tenant', accountId: owner._id },
-          { _id: branchEmail, kind: 'tenant', accountId: branchLogin._id },
+          { _id: ownerEmail, kind: 'tenant', businessId, userId: owner._id },
+          { _id: branchEmail, kind: 'tenant', businessId, userId: branchLogin._id },
         ],
         { session }
       );
 
-      return { business, owner, branch, branchLogin };
+      return { business, owner: toSafeUser(owner), branch, branchLogin: toSafeUser(branchLogin) };
     });
   }
 
@@ -157,6 +172,7 @@ export class BusinessService {
       action: 'business.update',
       entity: 'business',
       entityId: business._id,
+      businessId: business._id.toString(),
       after: updates,
     });
 
@@ -180,9 +196,13 @@ export class BusinessService {
       stations?: number;
       pettyCashFloatPaise?: number;
     }
-  ): Promise<{ branch: IBranch; branchLogin: IUser }> {
+  ): Promise<{ branch: IBranch; branchLogin: SafeUser }> {
     const businessId = toObjectId(businessIdStr);
     const branchEmail = data.loginEmail.trim().toLowerCase();
+
+    if (!(await Business.exists({ _id: businessId }))) {
+      throw new AppError(404, 'NOT_FOUND', 'Business not found');
+    }
 
     // Check duplicate email
     const existing = await EmailRegistry.findById(branchEmail);
@@ -237,7 +257,8 @@ export class BusinessService {
       await new EmailRegistry({
         _id: branchEmail,
         kind: 'tenant',
-        accountId: branchLogin._id,
+        businessId,
+        userId: branchLogin._id,
       }).save({ session });
 
       await auditService.logAction({
@@ -246,11 +267,12 @@ export class BusinessService {
         entity: 'branch',
         entityId: branch._id,
         after: { name: branch.name, code: branch.code },
+        businessId: businessId.toString(),
         branchId: branch._id,
         session,
       });
 
-      return { branch, branchLogin };
+      return { branch, branchLogin: toSafeUser(branchLogin) };
     });
   }
 
@@ -285,6 +307,7 @@ export class BusinessService {
       action: 'branch.deactivate',
       entity: 'branch',
       entityId: branch._id,
+      businessId: branch.businessId.toString(),
       branchId: branch._id,
       reason,
     });
@@ -343,6 +366,157 @@ export class BusinessService {
   }
 
   /**
+   * Super Admin dashboard counts across all businesses.
+   */
+  async getPlatformStats(): Promise<{
+    businesses: { total: number; active: number; suspended: number };
+    branches: { total: number; active: number };
+    users: { owners: number; managers: number; branchLogins: number };
+    pendingBranchRequests: number;
+  }> {
+    const [active, suspended, branchesTotal, branchesActive, owners, managers, branchLogins, pendingBranchRequests] =
+      await Promise.all([
+        Business.countDocuments({ status: 'active' }),
+        Business.countDocuments({ status: 'suspended' }),
+        Branch.countDocuments({}, skipScope),
+        Branch.countDocuments({ status: 'active' }, skipScope),
+        User.countDocuments({ role: 'owner' }, skipScope),
+        User.countDocuments({ role: 'manager' }, skipScope),
+        User.countDocuments({ role: 'branch' }, skipScope),
+        BranchRequest.countDocuments({ status: 'pending' }, skipScope),
+      ]);
+
+    return {
+      businesses: { total: active + suspended, active, suspended },
+      branches: { total: branchesTotal, active: branchesActive },
+      users: { owners, managers, branchLogins },
+      pendingBranchRequests,
+    };
+  }
+
+  /**
+   * Super Admin lists businesses, newest first, with owner and active branch count.
+   */
+  async listBusinesses(filters: {
+    page: number;
+    limit: number;
+    q?: string;
+    status?: 'active' | 'suspended';
+  }): Promise<{ businesses: any[]; total: number }> {
+    const query: any = {};
+    if (filters.status) query.status = filters.status;
+    if (filters.q) query.name = { $regex: escapeRegex(filters.q), $options: 'i' };
+
+    const [rows, total] = await Promise.all([
+      Business.find(query)
+        .sort({ createdAt: -1 })
+        .skip((filters.page - 1) * filters.limit)
+        .limit(filters.limit)
+        .lean(),
+      Business.countDocuments(query),
+    ]);
+
+    const ids = rows.map((b) => b._id);
+    const [owners, branchCounts] = await Promise.all([
+      User.find({ businessId: { $in: ids }, role: 'owner' }).select('businessId name email phone status').lean(),
+      Branch.aggregate([
+        { $match: { businessId: { $in: ids }, status: { $ne: 'deactivated' } } },
+        { $group: { _id: '$businessId', n: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const ownerByBusiness = new Map(owners.map((o) => [o.businessId.toString(), o]));
+    const countByBusiness = new Map(branchCounts.map((c) => [c._id.toString(), c.n]));
+
+    const businesses = rows.map((b) => {
+      const owner = ownerByBusiness.get(b._id.toString());
+      return {
+        ...b,
+        owner: owner ? { _id: owner._id, name: owner.name, email: owner.email, phone: owner.phone, status: owner.status } : null,
+        branchCount: countByBusiness.get(b._id.toString()) || 0,
+      };
+    });
+
+    return { businesses, total };
+  }
+
+  /**
+   * Super Admin views one business with its owner, branches and user counts.
+   */
+  async getBusinessDetail(businessIdStr: string): Promise<{
+    business: any;
+    owner: any;
+    branches: any[];
+    counts: { managers: number; branchLogins: number };
+  }> {
+    const businessId = toObjectId(businessIdStr);
+    const business = await Business.findById(businessId).lean();
+    if (!business) {
+      throw new AppError(404, 'NOT_FOUND', 'Business not found');
+    }
+
+    const [owner, branches, managers, branchLogins] = await Promise.all([
+      User.findOne({ businessId, role: 'owner' }).select('-passwordHash').lean(),
+      Branch.find({ businessId }).sort({ createdAt: 1 }).lean(),
+      User.countDocuments({ businessId, role: 'manager' }),
+      User.countDocuments({ businessId, role: 'branch' }),
+    ]);
+
+    return { business, owner, branches, counts: { managers, branchLogins } };
+  }
+
+  /**
+   * Super Admin lists the owner, managers and branch logins of a business.
+   */
+  async listBusinessUsers(businessIdStr: string, role?: 'owner' | 'manager' | 'branch'): Promise<any[]> {
+    const businessId = toObjectId(businessIdStr);
+    if (!(await Business.exists({ _id: businessId }))) {
+      throw new AppError(404, 'NOT_FOUND', 'Business not found');
+    }
+
+    const query: any = { businessId };
+    if (role) query.role = role;
+    return User.find(query).select('-passwordHash').sort({ role: 1, createdAt: 1 }).lean();
+  }
+
+  /**
+   * Super Admin activates or deactivates any salon user. Deactivating revokes their sessions.
+   */
+  async setUserStatusByAdmin(ctx: RequestContext, userIdStr: string, status: 'active' | 'inactive'): Promise<SafeUser> {
+    const user = await User.findById(toObjectId(userIdStr), null, skipScope);
+    if (!user) {
+      throw new AppError(404, 'NOT_FOUND', 'User not found');
+    }
+
+    if (status === 'active' && user.role === 'branch') {
+      const branch = await Branch.findById(user.branchLoginFor, null, skipScope);
+      if (!branch || branch.status === 'deactivated') {
+        throw new AppError(409, 'BRANCH_INACTIVE', 'Branch is deactivated; its login cannot be reactivated');
+      }
+    }
+
+    const before = user.status;
+    user.status = status;
+    await user.save();
+
+    if (status === 'inactive' && before !== 'inactive') {
+      await authService.revokeAllSessions(user._id.toString());
+    }
+
+    await auditService.logAction({
+      ctx,
+      action: 'user.status_update',
+      entity: 'user',
+      entityId: user._id,
+      businessId: user.businessId.toString(),
+      before: { status: before },
+      after: { status },
+    });
+
+    return toSafeUser(user);
+  }
+
+  /**
    * Super Admin lists branch requests by status
    */
   async getBranchRequests(status: string = 'pending'): Promise<any[]> {
@@ -394,16 +568,18 @@ export class BusinessService {
       await req.save();
       return req;
     } else {
-      // Add branch
-      const result = await this.createBranchByAdmin(ctx, req.businessId.toString(), {
+      // Add branch: the owner's request has name + address, the Super Admin supplies the rest
+      const parsed = createBranchSchema.safeParse({
+        ...details,
         name: req.payload!.name,
-        code: details.code,
-        invoicePrefix: details.invoicePrefix,
         address: req.payload!.address,
-        phone: details.phone || '0000000000',
-        loginEmail: details.loginEmail,
-        loginPassword: details.loginPassword,
+        phone: details?.phone || '0000000000',
       });
+      if (!parsed.success) {
+        const fields = Object.fromEntries(parsed.error.issues.map((i) => [`note.${i.path.join('.')}`, i.message]));
+        throw new AppError(400, 'VALIDATION_ERROR', 'Branch details are required to approve an add request', { fields });
+      }
+      const result = await this.createBranchByAdmin(ctx, req.businessId.toString(), parsed.data);
 
       req.status = 'approved';
       req.branchId = result.branch._id;
@@ -553,7 +729,8 @@ export class BusinessService {
       await new EmailRegistry({
         _id: email,
         kind: 'tenant',
-        accountId: manager._id,
+        businessId,
+        userId: manager._id,
       }).save({ session });
 
       await auditService.logAction({

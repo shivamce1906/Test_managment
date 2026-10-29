@@ -26,7 +26,10 @@ export interface TokenPayload {
 }
 
 export class AuthService {
-  private redis = getRedisClient();
+  // Resolved per call: server.ts may swap in the mock client after this service is constructed.
+  private get redis() {
+    return getRedisClient();
+  }
 
   /**
    * Generates a signed JWT access token.
@@ -320,7 +323,7 @@ export class AuthService {
   async setPassword(ctx: RequestContext, targetUserId: string, newPassword: string): Promise<void> {
     const passwordHash = await hashPassword(newPassword);
 
-    if (ctx.role === 'superadmin') {
+    if (ctx.role === 'superadmin' || ctx.role === 'super_admin') {
       // Super admin can reset any password
       const user = await User.findById(targetUserId, null, { skipTenantScope: true });
       if (user) {
@@ -333,6 +336,7 @@ export class AuthService {
           action: 'user.password_set',
           entity: 'user',
           entityId: user._id,
+          businessId: user.businessId,
           reason: 'Password reset by superadmin',
         });
         return;

@@ -11,6 +11,20 @@ How to use this file:
 
 Re-run one area after a fix, e.g. `npx jest tests/integration/billing.core`.
 
+> **Progress — 2026-10-28 (Super Admin phase).** Fixed so far:
+> - **#2** transactions (on replica sets / Atlas)
+> - **#9** account creation
+> - Super Admin password reset (`super_admin` role string)
+> - `PATCH /admin/businesses/:id` accepting `status`
+> - GSTIN required on onboarding
+> - Redis startup (two bugs found after this report)
+>
+> Full suite now: **612 tests · 411 passed · 201 failed**. This includes 26 new Super Admin tests, all passing.
+>
+> 15 tests that failed before now pass, and none that passed before now fail. One exception: *"GET /bills/:id returns the bill with its versions"* passed only because a failed edit left its snapshot behind. It now waits on #7.
+>
+> Parts 1 and 3 below still describe the original run. See [SUPERADMIN_API_GUIDE.md §10](SUPERADMIN_API_GUIDE.md#10-backend-changes-made-for-this-panel-2026-10-28) for the list of changes.
+
 ---
 
 ## Summary by test file

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import {
+  authService,
   businessService,
   configureWaNumber,
   createImportJob,
@@ -9,6 +10,60 @@ import {
 } from '../services';
 
 export class AdminController {
+  public static async getStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await businessService.getPlatformStats();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async listBusinesses(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await businessService.listBusinesses(req.query as any);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async getBusiness(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await businessService.getBusinessDetail(req.params.id);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async getBusinessUsers(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await businessService.listBusinessUsers(req.params.id, req.query.role as any);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async setUserPassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      await authService.setPassword(req.ctx, req.params.id, req.body.password);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async setUserStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await businessService.setUserStatusByAdmin(req.ctx, req.params.id, req.body.status);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   public static async createBusiness(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const result = await businessService.createBusiness(req.body);

@@ -14,6 +14,8 @@ import {
   adjustWallet,
   getLoyaltyLedger,
   lookupVoucher,
+  getWalletSummary,
+  getLoyaltySummary,
 } from '../services';
 
 export class PrepaidController {
@@ -28,8 +30,7 @@ export class PrepaidController {
 
   public static async getPlans(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const type = req.query.type as any;
-      const result = await getPlans(req.ctx, type);
+      const result = await getPlans(req.ctx, req.query as any);
       res.json(result);
     } catch (err) {
       next(err);
@@ -140,6 +141,22 @@ export class PrepaidController {
     try {
       const result = await lookupVoucher(req.ctx, req.params.code);
       res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async getWallet(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      res.json(await getWalletSummary(req.ctx, req.params.id));
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async getLoyalty(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      res.json(await getLoyaltySummary(req.ctx, req.params.id));
     } catch (err) {
       next(err);
     }

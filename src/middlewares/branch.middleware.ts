@@ -1,7 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
+import { Types } from 'mongoose';
+import { Branch } from '../models';
 import { AppError, ErrorCode } from '../utils';
 
-export function requireBranchAccess(req: Request, res: Response, next: NextFunction) {
+export async function requireBranchAccess(req: Request, res: Response, next: NextFunction) {
   if (!req.ctx) {
     return next(new AppError(401, ErrorCode.UNAUTHENTICATED, 'Authentication required'));
   }
@@ -10,9 +12,25 @@ export function requireBranchAccess(req: Request, res: Response, next: NextFunct
   if (!branchId) {
     return next(new AppError(400, ErrorCode.BAD_REQUEST, 'branchId is required'));
   }
+  if (!Types.ObjectId.isValid(branchId)) {
+    return next(new AppError(400, ErrorCode.BAD_REQUEST, 'Invalid branchId'));
+  }
 
-  // Super Admin and Owner have access to all branches of their tenant
-  if (req.ctx.role === 'super_admin' || req.ctx.role === 'owner') {
+  // Owner has access to every branch of their own business (another business's branch is a 404)
+  if (req.ctx.role === 'owner') {
+    try {
+      const exists = await Branch.exists({ _id: new Types.ObjectId(branchId), businessId: new Types.ObjectId(req.ctx.businessId) });
+      if (!exists) {
+        return next(new AppError(404, ErrorCode.NOT_FOUND, 'Branch not found'));
+      }
+    } catch (err) {
+      return next(err);
+    }
+    req.ctx.branchId = branchId;
+    return next();
+  }
+
+  if (req.ctx.role === 'super_admin') {
     req.ctx.branchId = branchId;
     return next();
   }

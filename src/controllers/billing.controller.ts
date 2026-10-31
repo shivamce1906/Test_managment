@@ -19,7 +19,7 @@ export class BillingController {
 
   public createBill = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const result = await this.billingService.createBill(req.ctx, req.params.branchId, req.body);
+      const result = await this.billingService.createBill(req.ctx, req.params.branchId, req.body, req.get('Idempotency-Key') || undefined);
       res.status(201).json(result);
     } catch (err) {
       next(err);
@@ -57,12 +57,10 @@ export class BillingController {
   public decideBill = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const { decision, reason } = req.body;
-      let result;
-      if (decision === 'approve') {
-        result = await this.billingService.approveBill(req.ctx, req.params.id);
-      } else {
-        result = await this.billingService.rejectBill(req.ctx, req.params.id, reason || 'Rejected by approver');
-      }
+      const result =
+        decision === 'approve'
+          ? await this.billingService.approveBill(req.ctx, req.params.id, reason)
+          : await this.billingService.rejectBill(req.ctx, req.params.id, reason);
       res.json(result);
     } catch (err) {
       next(err);
@@ -73,6 +71,18 @@ export class BillingController {
     try {
       const result = await this.billingService.getBillById(req.ctx, req.params.id);
       res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  public getInvoicePdf = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const format = req.query.format === 'thermal' ? 'thermal' : 'a4';
+      const { invoiceNo, pdf } = await this.billingService.getInvoicePdf(req.ctx, req.params.id, format);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${invoiceNo.replace(/\//g, '-')}.pdf"`);
+      res.send(pdf);
     } catch (err) {
       next(err);
     }

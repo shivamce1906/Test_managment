@@ -19,7 +19,7 @@ export class CatalogueController {
 
   public getCategories = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const result = await this.catalogueService.getCategories(req.ctx);
+      const result = await this.catalogueService.getCategories(req.ctx, (req.query as any).active);
       res.json(result);
     } catch (err) {
       next(err);
@@ -55,10 +55,13 @@ export class CatalogueController {
 
   public getServices = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const branchId = (req.query.branchId as string) || req.ctx.branchId;
-      const categoryId = req.query.categoryId as string;
-      const search = req.query.search as string;
-      const result = await this.catalogueService.getServices(req.ctx, { branchId, categoryId, search });
+      const { branchId, categoryId, search, active } = req.query as any;
+      const result = await this.catalogueService.getServices(req.ctx, {
+        branchId: branchId || req.ctx.branchId,
+        categoryId,
+        search,
+        active,
+      });
       res.json(result);
     } catch (err) {
       next(err);
@@ -95,8 +98,7 @@ export class CatalogueController {
 
   public setBranchPrice = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const { branchId, pricePaise } = req.body;
-      const result = await this.catalogueService.setBranchPrice(req.ctx, req.params.id, branchId, pricePaise);
+      const result = await this.catalogueService.setBranchPrice(req.ctx, req.params.id, req.body);
       res.json(result);
     } catch (err) {
       next(err);

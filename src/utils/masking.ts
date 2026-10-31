@@ -1,3 +1,5 @@
+import { AppError } from './errors';
+
 /**
  * Masking utilities for phone numbers and email addresses per FR-AUTH-09.
  * Masks Indian 10-digit / +91 phone numbers to format '98XXXXXX21'.
@@ -36,5 +38,9 @@ export function normalizePhone(phone: string): string {
   if (digits.length === 11 && digits.startsWith('0')) {
     return `+91${digits.slice(1)}`;
   }
-  return `+${digits}`;
+  // Other countries: E.164 allows up to 15 digits. Anything shorter than 10 is not a phone.
+  if (digits.length >= 11 && digits.length <= 15) {
+    return `+${digits}`;
+  }
+  throw new AppError(400, 'VALIDATION_ERROR', 'Invalid phone number', { fields: { phone: 'Enter a valid 10-digit mobile number' } });
 }

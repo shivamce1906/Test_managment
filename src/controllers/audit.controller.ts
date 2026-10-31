@@ -14,8 +14,9 @@ export class AuditController {
   public static async exportAuditLogs(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const result = await exportAuditLogs(req.ctx, req.query as any);
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename="audit_logs.csv"');
+      // exportAuditLogs builds an Excel workbook
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="audit-log.xlsx"');
       res.send(result);
     } catch (err) {
       next(err);

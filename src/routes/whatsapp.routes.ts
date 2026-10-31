@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import { guardedRouter } from './guarded-router';
 import { authenticate } from '../middlewares/auth.middleware';
-import { requireRole } from '../middlewares/role.middleware';
+import { requireRole, requireKind } from '../middlewares/role.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import {
   sendWaMessageSchema,
@@ -18,23 +19,24 @@ whatsappRouter.post('/webhooks/aisensy/:numberId', WhatsappController.processWeb
 // 2. Feedback submission endpoint
 whatsappRouter.post('/whatsapp/feedback', authenticate(), validate({ body: submitFeedbackSchema }), WhatsappController.submitFeedback);
 
-// Authenticated WhatsApp endpoints
-whatsappRouter.use(authenticate());
+// Authenticated WhatsApp endpoints (guards run only for these routes, not for other routers' paths)
+const whatsappAuthed = guardedRouter(authenticate(), requireKind('tenant'));
+whatsappRouter.use(whatsappAuthed);
 
 // 3. Shared Inbox & Conversations
-whatsappRouter.get('/whatsapp/conversations', WhatsappController.getConversations);
-whatsappRouter.get('/whatsapp/conversations/:id', WhatsappController.getConversationById);
-whatsappRouter.get('/whatsapp/messages', WhatsappController.getMessages);
-whatsappRouter.post('/whatsapp/messages', validate({ body: sendWaMessageSchema }), WhatsappController.sendMessage);
+whatsappAuthed.get('/whatsapp/conversations', WhatsappController.getConversations);
+whatsappAuthed.get('/whatsapp/conversations/:id', WhatsappController.getConversationById);
+whatsappAuthed.get('/whatsapp/messages', WhatsappController.getMessages);
+whatsappAuthed.post('/whatsapp/messages', validate({ body: sendWaMessageSchema }), WhatsappController.sendMessage);
 
 // 4. Templates
-whatsappRouter.get('/whatsapp/templates', WhatsappController.getTemplates);
-whatsappRouter.post('/whatsapp/templates/sync', requireRole('owner'), WhatsappController.syncTemplates);
+whatsappAuthed.get('/whatsapp/templates', WhatsappController.getTemplates);
+whatsappAuthed.post('/whatsapp/templates/sync', requireRole('owner'), WhatsappController.syncTemplates);
 
 // 5. Campaigns
-whatsappRouter.post('/whatsapp/campaigns', requireRole('owner', 'manager'), validate({ body: createWaCampaignSchema }), WhatsappController.createCampaign);
-whatsappRouter.get('/whatsapp/campaigns', WhatsappController.getCampaigns);
+whatsappAuthed.post('/whatsapp/campaigns', requireRole('owner', 'manager'), validate({ body: createWaCampaignSchema }), WhatsappController.createCampaign);
+whatsappAuthed.get('/whatsapp/campaigns', WhatsappController.getCampaigns);
 
 // 6. Automations
-whatsappRouter.get('/whatsapp/automations', WhatsappController.getAutomations);
-whatsappRouter.patch('/whatsapp/automations/:key', requireRole('owner', 'manager'), validate({ body: updateWaAutomationSchema }), WhatsappController.updateAutomation);
+whatsappAuthed.get('/whatsapp/automations', WhatsappController.getAutomations);
+whatsappAuthed.patch('/whatsapp/automations/:key', requireRole('owner', 'manager'), validate({ body: updateWaAutomationSchema }), WhatsappController.updateAutomation);

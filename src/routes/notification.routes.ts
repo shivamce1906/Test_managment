@@ -1,10 +1,10 @@
-import { Router } from 'express';
+import { guardedRouter } from './guarded-router';
+import { requireKind } from '../middlewares/role.middleware';
 import { authenticate } from '../middlewares/auth.middleware';
 import { NotificationController } from '../controllers/notification.controller';
 
-export const notificationRouter = Router();
+export const notificationRouter = guardedRouter(authenticate(), requireKind('tenant'));
 
-notificationRouter.use(authenticate());
 
 // 1. In-App Notifications
 notificationRouter.get('/notifications', NotificationController.getNotifications);

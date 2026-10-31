@@ -48,6 +48,20 @@ const auditLogSchema = new Schema<IAuditLog>(
   }
 );
 
+// Append-only (PRD §16): entries are inserted and read, never changed or removed through the app.
+const APPEND_ONLY_ERROR = 'Audit log entries are append-only';
+for (const op of ['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace', 'deleteOne', 'deleteMany', 'findOneAndDelete'] as const) {
+  auditLogSchema.pre(op, function () {
+    throw new Error(APPEND_ONLY_ERROR);
+  });
+}
+auditLogSchema.pre('save', function () {
+  if (!this.isNew) throw new Error(APPEND_ONLY_ERROR);
+});
+auditLogSchema.pre('deleteOne', { document: true, query: false }, function () {
+  throw new Error(APPEND_ONLY_ERROR);
+});
+
 auditLogSchema.index({ businessId: 1, at: -1 });
 auditLogSchema.index({ businessId: 1, entity: 1, entityId: 1 });
 

@@ -68,7 +68,15 @@ export function errorHandler(
     });
   }
 
-  // 5. Mongoose Cast Error (Invalid ObjectId)
+  // 5. Invalid ObjectId: Mongoose CastError, or BSONError from new Types.ObjectId('bad') in services
+  if (err.name === 'BSONError') {
+    return res.status(400).json({
+      error: {
+        code: ErrorCode.BAD_REQUEST,
+        message: 'Invalid ID format',
+      },
+    });
+  }
   if (err.name === 'CastError') {
     return res.status(400).json({
       error: {

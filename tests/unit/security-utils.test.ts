@@ -42,9 +42,12 @@ describe('normalizePhone (+91XXXXXXXXXX)', () => {
     expect(normalizePhone(input)).toBe(out);
   });
   it('EDGE: garbage input must not produce a stored "valid-looking" number', () => {
-    // A 5-digit or letters-only input should not normalise into a +91 identity.
-    expect(normalizePhone('12345')).not.toMatch(/^\+\d{1,9}$/);
-    expect(normalizePhone('abcdefghij')).not.toBe('+');
+    // A 5-digit or letters-only input should not normalise into a +91 identity: either rejected
+    // (the API then answers 400) or at least not shaped like a phone.
+    const attempt = (raw: string) => { try { return normalizePhone(raw); } catch { return null; } };
+    expect(attempt('12345') ?? '').not.toMatch(/^\+\d{1,9}$/);
+    expect(attempt('abcdefghij')).not.toBe('+');
+    expect(() => normalizePhone('12345')).toThrow();
   });
 });
 

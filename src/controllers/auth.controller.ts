@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
+import { Types } from 'mongoose';
 import { AuthService } from '../services';
+import { Business, Branch } from '../models';
 
 export class AuthController {
   private authService: AuthService;
@@ -41,7 +43,24 @@ export class AuthController {
 
   public me = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
+      // Salon users also get their business and the branches they can open (owner: all)
+      let business = null;
+      let branches: unknown[] = [];
+      if (req.ctx.kind === 'tenant' && req.ctx.businessId) {
+        const businessId = new Types.ObjectId(req.ctx.businessId);
+        const branchQuery: Record<string, unknown> = { businessId };
+        if (req.ctx.role !== 'owner') {
+          branchQuery._id = { $in: req.ctx.branchIds.map((id) => new Types.ObjectId(id)) };
+        }
+        [business, branches] = await Promise.all([
+          Business.findById(businessId).select('name logoUrl status headBranchId gst.enabled').lean(),
+          Branch.find(branchQuery).select('name code status').sort({ createdAt: 1 }).lean(),
+        ]);
+      }
+
       res.json({
+        business,
+        branches,
         user: {
           id: req.ctx.userId,
           name: req.ctx.name,

@@ -5,6 +5,8 @@ import {
   Product,
   Vendor,
   Bill,
+  Branch,
+  Staff,
   ICategory,
   IService,
   IProduct,
@@ -13,6 +15,16 @@ import {
 import { AppError } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
+import { assertRefsInBusiness } from './tenant-refs';
+
+const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Checks every branch, product and staff id a service body points at belongs to this business. */
+async function assertServiceRefs(businessId: Types.ObjectId, data: any): Promise<void> {
+  await assertRefsInBusiness(Branch, businessId, data.branchPrices?.map((bp: any) => bp.branchId), 'branches');
+  await assertRefsInBusiness(Product, businessId, data.consumables?.map((c: any) => c.productId), 'products');
+  await assertRefsInBusiness(Staff, businessId, data.eligibleStaffIds, 'staff');
+}
 
 export class CatalogueService {
   // --- CATEGORIES ---
@@ -74,6 +86,10 @@ export class CatalogueService {
         if (!parent || parent._id.equals(category._id)) {
           throw new AppError(400, 'VALIDATION_ERROR', 'Invalid parent category');
         }
+        // Max two levels: the parent must be top-level and this category must have no children
+        if (parent.parentId || (await Category.exists({ businessId, parentId: category._id }))) {
+          throw new AppError(400, 'VALIDATION_ERROR', 'Maximum 2 levels of categories allowed');
+        }
         category.parentId = parent._id;
       } else {
         category.parentId = undefined;
@@ -110,9 +126,11 @@ export class CatalogueService {
     }
   }
 
-  async getCategories(ctx: RequestContext): Promise<ICategory[]> {
+  async getCategories(ctx: RequestContext, active?: boolean): Promise<ICategory[]> {
     const businessId = toObjectId(ctx.businessId!);
-    return Category.find({ businessId }).sort({ order: 1, name: 1 });
+    const query: any = { businessId };
+    if (active !== undefined) query.active = active;
+    return Category.find(query).sort({ order: 1, name: 1 });
   }
 
   // --- SERVICES ---
@@ -128,6 +146,7 @@ export class CatalogueService {
     if (!category) {
       throw new AppError(404, 'NOT_FOUND', 'Category not found');
     }
+    await assertServiceRefs(businessId, data);
 
     const service = new Service({
       businessId,
@@ -197,7 +216,13 @@ export class CatalogueService {
       }
     } else if (ctx.role === 'owner') {
       // Owner can update everything
-      if (updates.categoryId) service.categoryId = toObjectId(updates.categoryId);
+      if (updates.categoryId) {
+        if (!(await Category.exists({ _id: toObjectId(updates.categoryId), businessId }))) {
+          throw new AppError(404, 'NOT_FOUND', 'Category not found');
+        }
+        service.categoryId = toObjectId(updates.categoryId);
+      }
+      await assertServiceRefs(businessId, updates);
       if (updates.name) service.name = updates.name;
       if (updates.gender) service.gender = updates.gender;
       if (updates.basePricePaise !== undefined) service.basePricePaise = updates.basePricePaise;
@@ -276,7 +301,7 @@ export class CatalogueService {
 
     if (filters.categoryId) query.categoryId = toObjectId(filters.categoryId);
     if (filters.active !== undefined) query.active = filters.active;
-    if (filters.search) query.name = { $regex: filters.search, $options: 'i' };
+    if (filters.search) query.name = { $regex: escapeRegex(filters.search), $options: 'i' };
 
     const services = await Service.find(query).sort({ name: 1 });
 
@@ -312,33 +337,101 @@ export class CatalogueService {
     return svc;
   }
 
-  async deleteCategory(ctx: RequestContext, id: string): Promise<void> {
+  /**
+   * Deactivates a category (soft delete). Blocked while active services or sub-categories use it.
+   */
+  async deleteCategory(ctx: RequestContext, id: string): Promise<ICategory> {
     const businessId = toObjectId(ctx.businessId!);
-    await Category.updateOne({ _id: toObjectId(id), businessId }, { $set: { active: false } });
+    const category = await Category.findOne({ _id: toObjectId(id), businessId });
+    if (!category) {
+      throw new AppError(404, 'NOT_FOUND', 'Category not found');
+    }
+
+    const [services, children] = await Promise.all([
+      Service.countDocuments({ businessId, categoryId: category._id, active: true }),
+      Category.countDocuments({ businessId, parentId: category._id, active: true }),
+    ]);
+    if (services > 0 || children > 0) {
+      throw new AppError(409, 'CATEGORY_IN_USE', 'Move or deactivate its services and sub-categories first', {
+        details: { services, subCategories: children },
+      });
+    }
+
+    category.active = false;
+    await category.save();
+
+    await auditService.logAction({
+      ctx,
+      action: 'category.deactivate',
+      entity: 'category',
+      entityId: category._id,
+      after: { active: false },
+    });
+
+    return category;
   }
 
-  async deleteService(ctx: RequestContext, id: string): Promise<void> {
-    const businessId = toObjectId(ctx.businessId!);
-    await Service.updateOne({ _id: toObjectId(id), businessId }, { $set: { active: false } });
+  /**
+   * Deactivates a service (soft delete); past bills keep referring to it.
+   */
+  async deleteService(ctx: RequestContext, id: string): Promise<IService> {
+    const service = await this.deleteOrDeactivateService(ctx, id);
+
+    await auditService.logAction({
+      ctx,
+      action: 'service.deactivate',
+      entity: 'service',
+      entityId: service._id,
+      after: { active: false },
+    });
+
+    return service;
   }
 
-  async setBranchPrice(ctx: RequestContext, serviceId: string, branchId: string, pricePaise: number): Promise<IService> {
+  /**
+   * Sets one branch's price override for a service (pricePaise null = use the base price) and
+   * optionally hides the service in that branch. Managers may only change their own branches.
+   */
+  async setBranchPrice(
+    ctx: RequestContext,
+    serviceId: string,
+    input: { branchId: string; pricePaise?: number | null; active?: boolean }
+  ): Promise<IService> {
     const businessId = toObjectId(ctx.businessId!);
+    if (ctx.role === 'manager' && !ctx.branchIds.includes(input.branchId)) {
+      throw new AppError(403, 'FORBIDDEN', 'Cannot change prices for a branch you do not manage');
+    }
+    await assertRefsInBusiness(Branch, businessId, [input.branchId], 'branches');
+
     const service = await Service.findOne({ _id: toObjectId(serviceId), businessId });
     if (!service) {
       throw new AppError(404, 'NOT_FOUND', 'Service not found');
     }
-    const idx = service.branchPrices.findIndex((bp) => bp.branchId.toString() === branchId);
+
+    const idx = service.branchPrices.findIndex((bp) => bp.branchId.toString() === input.branchId);
+    const before = idx >= 0 ? { pricePaise: service.branchPrices[idx].pricePaise, active: service.branchPrices[idx].active } : null;
     if (idx >= 0) {
-      service.branchPrices[idx].pricePaise = pricePaise;
+      if (input.pricePaise !== undefined) service.branchPrices[idx].pricePaise = input.pricePaise ?? undefined;
+      if (input.active !== undefined) service.branchPrices[idx].active = input.active;
     } else {
       service.branchPrices.push({
-        branchId: toObjectId(branchId),
-        pricePaise,
-        active: true,
+        branchId: toObjectId(input.branchId),
+        pricePaise: input.pricePaise ?? undefined,
+        active: input.active ?? true,
       });
     }
     await service.save();
+
+    await auditService.logAction({
+      ctx,
+      action: 'service.branch_price_update',
+      entity: 'service',
+      entityId: service._id,
+      branchId: input.branchId,
+      before: before ?? undefined,
+      after: { pricePaise: input.pricePaise, active: input.active },
+    });
+
     return service;
   }
 

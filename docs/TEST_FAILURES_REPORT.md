@@ -23,6 +23,40 @@ Re-run one area after a fix, e.g. `npx jest tests/integration/billing.core`.
 >
 > 15 tests that failed before now pass, and none that passed before now fail. One exception: *"GET /bills/:id returns the bill with its versions"* passed only because a failed edit left its snapshot behind. It now waits on #7.
 >
+> **Progress — 2026-10-29 (Owner Phase 1: setup).**
+> - Fixed the `.populate()` crash, part of #4. That one change fixed leaves, advances, dues, stock list, dashboard and inventory valuation.
+> - Owner branch access is now checked against the business.
+> - A malformed id now returns 400 instead of 500.
+> - Fixed the staff, roster, attendance, leave, catalogue and team rules listed in [OWNER_API_GUIDE.md §10](OWNER_API_GUIDE.md#10-backend-changes-made-for-phase-1-2026-10-29).
+>
+> Full suite now: **637 tests · 460 passed · 177 failed**. No test that passed before now fails, apart from the case below.
+>
+> *"lead phone is masked for the branch login in lists"* used to pass only because `GET /leads` crashed. It now fails on the real bug (phones aren't masked) and waits for the leads phase.
+>
+> **Progress — 2026-10-29 (Owner Phases 2–3: front desk, plans, stock, money).** Fixed:
+> - **#1:** router guard leak.
+> - **#3:** indexes; the app can build them, and `scripts/check-duplicates.ts` found no duplicates on Atlas.
+> - **#4:** the remaining tenant-scope crashes in these areas.
+> - **#7:** bill edit.
+> - **#10:** Idempotency-Key.
+> - **Billing:** commission (slab, product, fallback); membership scope; loyalty valued by the server.
+> - **Day-end:** expenses ignored; refund day.
+> - **Stock and plans:** every inventory and plan rule in Part 3.
+>
+> **New bug found and fixed:** the compound sparse `customerPlans` voucher index allowed only one non-voucher plan per business. Atlas needs `scripts/build-indexes.ts` to replace it.
+>
+> Full suite now: **680 tests · 618 passed · 62 failed**. All 62 are in reports/dashboard, payroll, leads/WhatsApp, workers and auth hardening (Phase 4 and later). See [OWNER_API_GUIDE.md §19](OWNER_API_GUIDE.md#19-backend-changes-for-phases-23-2026-10-29).
+>
+> **Progress — 2026-10-29 (Owner Phase 4: insights, payroll).** Fixed:
+> - **#8:** payroll create and mark-paid (the controller passed a bare string); statutory deductions, proration, stale check, partial mark-paid.
+> - **Reports and dashboard:** rebuilt from source records (date range honoured, branch scope, margins, P&L, GSTR-1).
+> - **Audit log:** append-only at the model level; the export is a real `.xlsx`.
+> - **New:** bills in a locked payroll month are frozen (`PAYROLL_LOCKED`); payslip PDFs.
+>
+> On Atlas, `scripts/build-indexes.ts` replaced the voucher index. `waMessages` still fails to build: an existing non-unique `providerMessageId_1` has the same name. It was left as is for the WhatsApp phase.
+>
+> Full suite now: **700 tests · 652 passed · 48 failed**. The 48 are leads/WhatsApp (23), workers (13), reports-system (6: change polling, upload presign, CORS, body limit, unknown keys) and auth hardening (6). See [OWNER_API_GUIDE.md §25](OWNER_API_GUIDE.md#25-backend-changes-for-phase-4-2026-10-29).
+>
 > Parts 1 and 3 below still describe the original run. See [SUPERADMIN_API_GUIDE.md §10](SUPERADMIN_API_GUIDE.md#10-backend-changes-made-for-this-panel-2026-10-28) for the list of changes.
 
 ---

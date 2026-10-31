@@ -40,7 +40,11 @@ export interface IPayrollRun extends Document {
   lines: IPayrollRunLine[];
   totals: {
     netPaise: number;
+    grossPaise?: number;
+    deductionsPaise?: number;
   };
+  /** When the lines were last (re)calculated; bills changed after this make the run stale. */
+  generatedAt?: Date;
   lockedBy?: Types.ObjectId;
   lockedAt?: Date;
   createdAt: Date;
@@ -91,7 +95,10 @@ const payrollRunSchema = new Schema<IPayrollRun>(
     ],
     totals: {
       netPaise: { type: Number, required: true },
+      grossPaise: { type: Number },
+      deductionsPaise: { type: Number },
     },
+    generatedAt: { type: Date },
     lockedBy: { type: Schema.Types.ObjectId, ref: 'users' },
     lockedAt: { type: Date },
   },

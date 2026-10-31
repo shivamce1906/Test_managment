@@ -15,6 +15,7 @@ import {
   createAdvance,
   getAdvances,
 } from '../services';
+import { getBusinessDate } from '../utils';
 
 export class StaffController {
   public static async createStaff(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -73,7 +74,7 @@ export class StaffController {
 
   public static async getAttendance(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const date = (req.query.date as string) || new Date().toISOString().slice(0, 10);
+      const date = (req.query.date as string) || getBusinessDate();
       const result = await getAttendance(req.ctx, req.params.branchId, date);
       res.json(result);
     } catch (err) {
@@ -83,7 +84,8 @@ export class StaffController {
 
   public static async markAttendance(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const date = (req.query.date as string) || (req.body.businessDate as string) || new Date().toISOString().slice(0, 10);
+      // Default is today's IST business day (01:30 IST belongs to that day, not the UTC one)
+      const date = (req.query.date as string) || (req.body.businessDate as string) || getBusinessDate();
       const result = await markAttendance(req.ctx, req.params.branchId, date, req.body);
       res.json(result);
     } catch (err) {
@@ -102,7 +104,7 @@ export class StaffController {
 
   public static async createLeave(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await createLeave(req.ctx, req.body);
+      const result = await createLeave(req.ctx, req.params.branchId, req.body);
       res.status(201).json(result);
     } catch (err) {
       next(err);
@@ -129,7 +131,7 @@ export class StaffController {
 
   public static async createAdvance(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await createAdvance(req.ctx, req.body);
+      const result = await createAdvance(req.ctx, req.params.branchId, req.body);
       res.status(201).json(result);
     } catch (err) {
       next(err);

@@ -39,8 +39,13 @@ export class CustomerController {
 
   public mergeCustomers = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const { duplicateId, primaryId } = req.body;
-      const result = await this.customerService.mergeCustomers(req.ctx, duplicateId, primaryId);
+      // POST /customers/:id/merge (SRS) keeps :id; POST /customers/merge takes primaryId in the body
+      const primaryId = req.params.id || req.body.primaryId;
+      if (!primaryId) {
+        res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'primaryId is required', fields: { primaryId: 'Required' } } });
+        return;
+      }
+      const result = await this.customerService.mergeCustomers(req.ctx, primaryId, req.body.duplicateId);
       res.json(result);
     } catch (err) {
       next(err);
@@ -86,7 +91,7 @@ export class CustomerController {
 
   public getCustomerHistory = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const result = await this.customerService.getCustomerHistory(req.ctx, req.params.id);
+      const result = await this.customerService.getCustomerHistory(req.ctx, req.params.id, req.query.type as string);
       res.json(result);
     } catch (err) {
       next(err);

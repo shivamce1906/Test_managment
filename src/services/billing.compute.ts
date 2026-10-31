@@ -110,10 +110,10 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
       }
     }
 
-    // 2. Membership discount (if applicable)
+    // 2. Membership discount: services only (never products, wallet top-ups or plan sales)
     let membershipDiscountPaise = 0;
     const membershipRedemption = redemptions.find((r) => r.kind === 'membership');
-    if (membershipRedemption && membershipRedemption.membershipDiscountBps) {
+    if (line.kind === 'service' && membershipRedemption && membershipRedemption.membershipDiscountBps) {
       const remainingVal = grossPaise - lineDiscountPaise;
       membershipDiscountPaise = calculateBps(remainingVal, membershipRedemption.membershipDiscountBps);
     }
@@ -201,7 +201,7 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
     const lineTotalPaise = taxablePaise + cgstPaise + sgstPaise;
 
     // Commission calculation (BR-03): on taxablePaise before GST
-    const computedStaff = (l.staff || []).map((st) => {
+    const lineCommissions = (l.staff || []).map((st) => {
       let baseCommissionValue = taxablePaise;
 
       // Package redemption commission basis is perSessionValuePaise
@@ -220,21 +220,32 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
           lineCommissionPaise = calculateBps(baseCommissionValue, st.rule.value);
         } else if (st.rule.type === 'fixed' && st.rule.value) {
           lineCommissionPaise = st.rule.value * l.qty;
+        } else if (st.rule.type === 'slab' && st.rule.slabs?.length) {
+          // Rate of the first slab whose ceiling covers this line's value (slabs sorted by uptoPaise)
+          const slabs = [...st.rule.slabs].sort((a, b) => a.uptoPaise - b.uptoPaise);
+          const slab = slabs.find((sl) => baseCommissionValue <= sl.uptoPaise) || slabs[slabs.length - 1];
+          lineCommissionPaise = calculateBps(baseCommissionValue, slab.bps);
         }
       } else if (l.kind === 'product' && st.productBps) {
         lineCommissionPaise = calculateBps(baseCommissionValue, st.productBps);
       }
-
-      // Split commission by splitBps (out of 10000 bps)
-      const commissionPaise = calculateBps(lineCommissionPaise, st.splitBps || 10000);
-
-      return {
-        staffId: st.staffId,
-        name: st.name,
-        splitBps: st.splitBps || 10000,
-        commissionPaise,
-      };
+      return lineCommissionPaise;
     });
+
+    // Each staff member's rule gives a full-line commission; their share is splitBps of it. The
+    // shares of one rule are distributed pro rata so rounding never pays out more than the line.
+    const splits = (l.staff || []).map((st) => st.splitBps || 10000);
+    const sameRule = lineCommissions.every((c) => c === lineCommissions[0]);
+    const shares = sameRule && lineCommissions.length > 1
+      ? distributeProRata(calculateBps(lineCommissions[0], splits.reduce((a, b) => a + b, 0)), splits)
+      : lineCommissions.map((c, idx) => calculateBps(c, splits[idx]));
+
+    const computedStaff = (l.staff || []).map((st, idx) => ({
+      staffId: st.staffId,
+      name: st.name,
+      splitBps: splits[idx],
+      commissionPaise: shares[idx],
+    }));
 
     return {
       _id: l._id,

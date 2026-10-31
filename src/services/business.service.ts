@@ -10,11 +10,12 @@ import {
   IBranch,
   IUser,
 } from '../models';
-import { AppError, hashPassword } from '../utils';
+import { AppError, hashPassword, normalizePhone } from '../utils';
 import { createBranchSchema } from '../validations';
 import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
 import { authService } from './auth.service';
+import { assertRefsInBusiness } from './tenant-refs';
 
 /** A user as plain JSON with the password hash removed, safe to return from the API. */
 export type SafeUser = Record<string, any>;
@@ -25,6 +26,31 @@ function toSafeUser(user: IUser): SafeUser {
 }
 
 const skipScope = { skipTenantScope: true };
+
+const isPlainObject = (v: unknown): v is Record<string, any> =>
+  !!v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Types.ObjectId) && !(v instanceof Date);
+
+/** Deep-merges partial settings (gst, discountLimits, payroll.pf, …) so unsent nested fields are kept. */
+function mergeSettings(current: Record<string, any>, updates: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = { ...current };
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+    out[key] = isPlainObject(value) && isPlainObject(current[key]) ? mergeSettings(current[key], value) : value;
+  }
+  return out;
+}
+
+function applyBusinessUpdates(business: IBusiness, updates: Record<string, any>): void {
+  const merged = mergeSettings(business.toObject(), updates);
+  for (const key of Object.keys(updates)) {
+    business.set(key, merged[key]);
+  }
+  if (business.gst?.enabled && !business.gst.gstin?.trim()) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'GSTIN is required when GST is enabled', {
+      fields: { 'gst.gstin': 'GSTIN is required when GST is enabled' },
+    });
+  }
+}
 
 function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -156,7 +182,7 @@ export class BusinessService {
     }
 
     const previousStatus = business.status;
-    Object.assign(business, updates);
+    applyBusinessUpdates(business, updates);
     await business.save();
 
     if (updates.status === 'suspended' && previousStatus !== 'suspended') {
@@ -603,7 +629,7 @@ export class BusinessService {
     }
 
     const before = business.toObject();
-    Object.assign(business, updates);
+    applyBusinessUpdates(business, updates);
     await business.save();
 
     await auditService.logAction({
@@ -657,7 +683,7 @@ export class BusinessService {
       query._id = { $in: allowed };
     }
 
-    return Branch.find(query);
+    return Branch.find(query).sort({ createdAt: 1 });
   }
 
   /**
@@ -695,7 +721,7 @@ export class BusinessService {
   /**
    * Owner creates a manager.
    */
-  async createManager(ctx: RequestContext, data: any): Promise<IUser> {
+  async createManager(ctx: RequestContext, data: any): Promise<SafeUser> {
     if (ctx.role !== 'owner') {
       throw new AppError(403, 'FORBIDDEN', 'Only owner can create managers');
     }
@@ -707,6 +733,7 @@ export class BusinessService {
     }
 
     const businessId = toObjectId(ctx.businessId!);
+    await assertRefsInBusiness(Branch, businessId, data.branchIds, 'branches');
     const passwordHash = await hashPassword(data.password);
 
     return withTransaction(async (session) => {
@@ -715,7 +742,7 @@ export class BusinessService {
         role: 'manager',
         name: data.name,
         email,
-        phone: data.phone,
+        phone: data.phone ? normalizePhone(data.phone) : undefined,
         passwordHash,
         branchIds: data.branchIds.map(toObjectId),
         flags: data.flags || {},
@@ -742,14 +769,14 @@ export class BusinessService {
         session,
       });
 
-      return manager;
+      return toSafeUser(manager);
     });
   }
 
   /**
    * Owner updates manager's branches, flags, or status.
    */
-  async updateManager(ctx: RequestContext, managerIdStr: string, updates: any): Promise<IUser> {
+  async updateManager(ctx: RequestContext, managerIdStr: string, updates: any): Promise<SafeUser> {
     if (ctx.role !== 'owner') {
       throw new AppError(403, 'FORBIDDEN', 'Only owner can update managers');
     }
@@ -763,7 +790,15 @@ export class BusinessService {
       throw new AppError(404, 'NOT_FOUND', 'Manager not found');
     }
 
-    const before = manager.toObject();
+    const { passwordHash: _hash, ...before } = manager.toObject();
+
+    if (updates.branchIds) {
+      await assertRefsInBusiness(Branch, manager.businessId, updates.branchIds, 'branches');
+    }
+    const branchesChanged =
+      !!updates.branchIds &&
+      [...updates.branchIds].sort().join() !== manager.branchIds.map((b) => b.toString()).sort().join();
+    const statusChanged = !!updates.status && updates.status !== manager.status;
 
     if (updates.branchIds) {
       manager.branchIds = updates.branchIds.map(toObjectId);
@@ -780,8 +815,10 @@ export class BusinessService {
 
     await manager.save();
 
-    // Revoking sessions on branch or status change
-    await authService.revokeAllSessions(manager._id.toString());
+    // A branch reassignment or deactivation logs the manager out; flag changes apply on the next request
+    if (branchesChanged || statusChanged) {
+      await authService.revokeAllSessions(manager._id.toString());
+    }
 
     await auditService.logAction({
       ctx,
@@ -792,7 +829,7 @@ export class BusinessService {
       after: updates,
     });
 
-    return manager;
+    return toSafeUser(manager);
   }
 
   /**
@@ -802,7 +839,7 @@ export class BusinessService {
     if (ctx.role !== 'owner') {
       throw new AppError(403, 'FORBIDDEN', 'Only owner can view managers list');
     }
-    return User.find({ businessId: toObjectId(ctx.businessId!), role: 'manager' }).select('-passwordHash');
+    return User.find({ businessId: toObjectId(ctx.businessId!), role: 'manager' }).select('-passwordHash').sort({ createdAt: 1 });
   }
 
   /**
@@ -820,7 +857,7 @@ export class BusinessService {
   /**
    * Owner or manager updates branch login flags (markAttendance).
    */
-  async updateBranchLoginFlags(ctx: RequestContext, branchLoginUserId: string, flags: { markAttendance: boolean }): Promise<IUser> {
+  async updateBranchLoginFlags(ctx: RequestContext, branchLoginUserId: string, flags: { markAttendance: boolean }): Promise<SafeUser> {
     const branchUser = await User.findOne({
       _id: toObjectId(branchLoginUserId),
       businessId: toObjectId(ctx.businessId!),
@@ -845,10 +882,11 @@ export class BusinessService {
       action: 'branch_login.flags_update',
       entity: 'user',
       entityId: branchUser._id,
+      branchId: branchUser.branchLoginFor,
       after: flags,
     });
 
-    return branchUser;
+    return toSafeUser(branchUser);
   }
 }
 

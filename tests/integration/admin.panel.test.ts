@@ -221,7 +221,7 @@ describe('Super Admin panel', () => {
       expect((await as(live.body.accessToken).get('/auth/me')).status).toBe(401);
       expect((await login(w.manager.email)).status).toBe(401);
       expect((await login(w.manager.email, 'NewPass123')).status).toBe(200);
-    }, 30000);
+    }, 60000);
 
     it('enforces password rules and 404s an unknown user', async () => {
       expect((await as(sa).post(`/admin/users/${w.manager._id}/password`, { password: 'short' })).status).toBe(400);

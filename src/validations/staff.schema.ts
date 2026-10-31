@@ -43,19 +43,25 @@ export const updateStaffSchema = createStaffSchema.partial().extend({
   exitReason: z.string().optional(),
 });
 
+const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:mm');
+
+// A working slot needs start < end; an off slot needs no times. "HH:mm" strings compare correctly.
+const shiftSlot = <T extends z.ZodRawShape>(shape: T) =>
+  z.object({ ...shape, start: hhmm.optional(), end: hhmm.optional(), off: z.boolean() }).superRefine((slot: any, ctx) => {
+    if (slot.off) return;
+    if (!slot.start || !slot.end) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['start'], message: 'start and end are required on a working day' });
+    } else if (slot.start >= slot.end) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['end'], message: 'end must be after start' });
+    }
+  });
+
 export const updateRosterSchema = z.object({
-  weekly: z.array(z.object({
-    day: z.number().int().min(0).max(6),
-    start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
-    end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
-    off: z.boolean(),
-  })),
-  overrides: z.array(z.object({
-    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
-    end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
-    off: z.boolean(),
-  })).default([]),
+  weekly: z.array(shiftSlot({ day: z.number().int().min(0).max(6) })).refine(
+    (days) => new Set(days.map((d: any) => d.day)).size === days.length,
+    'Each weekday may appear only once'
+  ),
+  overrides: z.array(shiftSlot({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) })).default([]),
 });
 
 export const markAttendanceSchema = z.object({
@@ -75,7 +81,7 @@ export const createLeaveSchema = z.object({
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   type: z.enum(['paid', 'unpaid']),
   reason: z.string().optional(),
-});
+}).refine((l) => l.to >= l.from, { path: ['to'], message: 'to must be on or after from' });
 
 export const updateLeaveStatusSchema = z.object({
   status: z.enum(['approved', 'rejected']),
@@ -88,3 +94,16 @@ export const createAdvanceSchema = z.object({
   recoveryPerMonthPaise: z.number().int().positive(),
   payFromTill: z.boolean().default(false), // If paid from cash till, creates a till expense
 });
+
+export const listStaffQuerySchema = z.object({
+  branchId: objectIdSchema.optional(),
+  status: z.enum(['active', 'exited']).optional(),
+  designation: z.enum(['stylist', 'senior_stylist', 'beautician', 'receptionist', 'manager', 'helper', 'other']).optional(),
+  q: z.string().trim().max(100).optional(),
+});
+
+export const businessDateQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD').optional(),
+});
+
+export const branchParamSchema = z.object({ branchId: objectIdSchema });

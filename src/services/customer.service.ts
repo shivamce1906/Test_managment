@@ -8,6 +8,10 @@ import {
   LoyaltyLedger,
   Feedback,
   WaConversation,
+  Due,
+  DueReceipt,
+  Lead,
+  Staff,
   withTransaction,
   ICustomer,
 } from '../models';
@@ -15,6 +19,21 @@ import { AppError, maskPhone, maskEmail, normalizePhone, getBusinessDate } from 
 import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
 import ExcelJS from 'exceljs';
+
+const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Managers and branch logins see masked phone and email unless they explicitly reveal (audited). */
+const masksContact = (ctx: RequestContext) => ctx.role === 'manager' || ctx.role === 'branch';
+
+function present(ctx: RequestContext, customer: ICustomer | any): any {
+  const obj: any = typeof customer.toObject === 'function' ? customer.toObject() : { ...customer };
+  if (masksContact(ctx)) {
+    obj.phone = maskPhone(obj.phone);
+    obj.altPhones = (obj.altPhones || []).map(maskPhone);
+    obj.email = maskEmail(obj.email);
+  }
+  return obj;
+}
 
 export class CustomerService {
   /**
@@ -57,7 +76,18 @@ export class CustomerService {
       duePaise: 0,
     });
 
-    await customer.save();
+    try {
+      await customer.save();
+    } catch (err: any) {
+      // Two requests for the same phone at once: the unique index lets one through
+      if (err?.code === 11000) {
+        const winner = await Customer.findOne({ businessId, phone });
+        throw new AppError(409, 'DUPLICATE_PHONE', `Customer with phone ${phone} already exists`, {
+          details: { customerId: winner?._id },
+        });
+      }
+      throw err;
+    }
 
     await auditService.logAction({
       ctx,
@@ -67,21 +97,23 @@ export class CustomerService {
       after: { name: customer.name, phone: maskPhone(customer.phone) },
     });
 
+    // Unmasked: the person creating the profile just typed this phone
     return customer;
   }
 
   /**
    * Updates customer profile.
    */
-  async updateCustomer(ctx: RequestContext, id: string, updates: any): Promise<ICustomer> {
+  async updateCustomer(ctx: RequestContext, id: string, input: any): Promise<any> {
+    const { phone: _phone, altPhones: _alt, referredBy, ...updates } = input;
     const businessId = toObjectId(ctx.businessId!);
     const customer = await Customer.findOne({ _id: toObjectId(id), businessId });
     if (!customer) {
       throw new AppError(404, 'NOT_FOUND', 'Customer not found');
     }
 
-    if (updates.phone) {
-      const newPhone = normalizePhone(updates.phone);
+    if (input.phone) {
+      const newPhone = normalizePhone(input.phone);
       if (newPhone !== customer.phone) {
         const existing = await Customer.findOne({ businessId, phone: newPhone });
         if (existing) {
@@ -95,8 +127,11 @@ export class CustomerService {
 
     const before = customer.toObject();
     Object.assign(customer, updates);
-    if (updates.altPhones) {
-      customer.altPhones = updates.altPhones.map(normalizePhone);
+    if (input.altPhones) {
+      customer.altPhones = input.altPhones.map(normalizePhone);
+    }
+    if (referredBy !== undefined) {
+      customer.referredBy = referredBy ? toObjectId(referredBy) : undefined;
     }
     await customer.save();
 
@@ -109,17 +144,20 @@ export class CustomerService {
       after: { name: customer.name, phone: maskPhone(customer.phone) },
     });
 
-    return customer;
+    return present(ctx, customer);
   }
 
   /**
    * Adds service note (e.g. hair colour formula, skin type preferences).
    */
-  async addServiceNote(ctx: RequestContext, id: string, note: { text: string; colourFormula?: string; staffId?: string }): Promise<ICustomer> {
+  async addServiceNote(ctx: RequestContext, id: string, note: { text: string; colourFormula?: string; staffId?: string }): Promise<any> {
     const businessId = toObjectId(ctx.businessId!);
     const customer = await Customer.findOne({ _id: toObjectId(id), businessId });
     if (!customer) {
       throw new AppError(404, 'NOT_FOUND', 'Customer not found');
+    }
+    if (note.staffId && !(await Staff.exists({ _id: toObjectId(note.staffId), businessId }))) {
+      throw new AppError(404, 'NOT_FOUND', 'Staff member not found');
     }
 
     const today = getBusinessDate(new Date());
@@ -136,7 +174,7 @@ export class CustomerService {
     }
 
     await customer.save();
-    return customer;
+    return present(ctx, customer);
   }
 
   /**
@@ -193,9 +231,9 @@ export class CustomerService {
     if (filters.q) {
       const normalized = filters.q.replace(/\D/g, '');
       if (normalized.length >= 4) {
-        query.phone = { $regex: normalized };
+        query.$or = [{ phone: { $regex: normalized } }, { altPhones: { $regex: normalized } }];
       } else {
-        query.name = { $regex: filters.q, $options: 'i' };
+        query.name = { $regex: escapeRegex(filters.q), $options: 'i' };
       }
     }
 
@@ -228,19 +266,7 @@ export class CustomerService {
       Customer.countDocuments(query),
     ]);
 
-    const shouldMask = ctx.role === 'manager' || ctx.role === 'branch';
-
-    const maskedCustomers = customers.map((c) => {
-      const obj: any = c.toObject();
-      if (shouldMask) {
-        obj.phone = maskPhone(obj.phone);
-        obj.altPhones = (obj.altPhones || []).map(maskPhone);
-        obj.email = maskEmail(obj.email);
-      }
-      return obj;
-    });
-
-    return { customers: maskedCustomers, total };
+    return { customers: customers.map((c) => present(ctx, c)), total };
   }
 
   /**
@@ -249,29 +275,34 @@ export class CustomerService {
   async getCustomerHistory(ctx: RequestContext, customerIdStr: string, type?: string): Promise<any> {
     const businessId = toObjectId(ctx.businessId!);
     const customerId = toObjectId(customerIdStr);
+    if (!(await Customer.exists({ _id: customerId, businessId }))) {
+      throw new AppError(404, 'NOT_FOUND', 'Customer not found');
+    }
 
+    // Most recent 50 of each kind; the bills tab can page through GET /branches/:id/bills?customerId=
+    const LIMIT = 50;
     const results: any = {};
 
     if (!type || type === 'bills') {
-      results.bills = await Bill.find({ businessId, customerId }).sort({ businessDate: -1 });
+      results.bills = await Bill.find({ businessId, customerId }).sort({ businessDate: -1, createdAt: -1 }).limit(LIMIT);
     }
     if (!type || type === 'appointments') {
-      results.appointments = await Appointment.find({ businessId, customerId }).sort({ start: -1 });
+      results.appointments = await Appointment.find({ businessId, customerId }).sort({ start: -1 }).limit(LIMIT);
     }
     if (!type || type === 'plans') {
-      results.plans = await CustomerPlan.find({ businessId, customerId }).sort({ validTill: -1 });
+      results.plans = await CustomerPlan.find({ businessId, customerId }).sort({ validTill: -1 }).limit(LIMIT);
     }
     if (!type || type === 'wallet') {
-      results.wallet = await WalletLedger.find({ businessId, customerId }).sort({ createdAt: -1 });
+      results.wallet = await WalletLedger.find({ businessId, customerId }).sort({ createdAt: -1 }).limit(LIMIT);
     }
     if (!type || type === 'loyalty') {
-      results.loyalty = await LoyaltyLedger.find({ businessId, customerId }).sort({ createdAt: -1 });
+      results.loyalty = await LoyaltyLedger.find({ businessId, customerId }).sort({ createdAt: -1 }).limit(LIMIT);
     }
     if (!type || type === 'feedback') {
-      results.feedback = await Feedback.find({ businessId, customerId }).sort({ createdAt: -1 });
+      results.feedback = await Feedback.find({ businessId, customerId }).sort({ createdAt: -1 }).limit(LIMIT);
     }
     if (!type || type === 'whatsapp') {
-      results.conversations = await WaConversation.find({ businessId, customerId }).sort({ lastMessageAt: -1 });
+      results.conversations = await WaConversation.find({ businessId, customerId }).sort({ lastMessageAt: -1 }).limit(LIMIT);
     }
 
     return results;
@@ -282,7 +313,7 @@ export class CustomerService {
    * Target profile keeps history; duplicate profile gets mergedInto target.
    * Duplicate phone is rewritten to merged:<dupId> so original phone is freed up.
    */
-  async mergeCustomers(ctx: RequestContext, targetIdStr: string, duplicateIdStr: string): Promise<ICustomer> {
+  async mergeCustomers(ctx: RequestContext, targetIdStr: string, duplicateIdStr: string): Promise<any> {
     if (ctx.role !== 'owner' && ctx.role !== 'manager') {
       throw new AppError(403, 'FORBIDDEN', 'Only owner or manager can merge customer profiles');
     }
@@ -303,7 +334,7 @@ export class CustomerService {
         throw new AppError(404, 'NOT_FOUND', 'One or both customer profiles not found');
       }
 
-      if (duplicate.mergedInto) {
+      if (duplicate.mergedInto || target.mergedInto) {
         throw new AppError(400, 'VALIDATION_ERROR', 'Duplicate customer has already been merged');
       }
 
@@ -315,6 +346,9 @@ export class CustomerService {
       await LoyaltyLedger.updateMany({ businessId, customerId: duplicateId }, { $set: { customerId: targetId } }, { session });
       await Feedback.updateMany({ businessId, customerId: duplicateId }, { $set: { customerId: targetId } }, { session });
       await WaConversation.updateMany({ businessId, customerId: duplicateId }, { $set: { customerId: targetId } }, { session });
+      await Due.updateMany({ businessId, customerId: duplicateId }, { $set: { customerId: targetId } }, { session });
+      await DueReceipt.updateMany({ businessId, customerId: duplicateId }, { $set: { customerId: targetId } }, { session });
+      await Lead.updateMany({ businessId, customerId: duplicateId }, { $set: { customerId: targetId } }, { session });
 
       // 2. Transfer wallet balance, loyalty points, dues, and stats to target
       target.walletBalancePaise += duplicate.walletBalancePaise;
@@ -350,7 +384,7 @@ export class CustomerService {
         session,
       });
 
-      return target;
+      return present(ctx, target);
     });
   }
 

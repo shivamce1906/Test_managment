@@ -29,6 +29,15 @@ export function tenantScopePlugin(schema: Schema) {
 
   queryOps.forEach((op) => {
     schema.pre(op as any, function (this: any) {
+      // Populate runs a plain `find({ _id: { $in } })` on the referenced model. Those ids come from
+      // documents this (tenant-checked) query returns, so the child queries may skip the check.
+      const populate = this._mongooseOptions?.populate;
+      if (populate) {
+        for (const spec of Object.values<any>(populate)) {
+          spec.options = { ...(spec.options || {}), skipTenantScope: true };
+        }
+      }
+
       if (this.options && this.options.skipTenantScope === true) {
         return;
       }

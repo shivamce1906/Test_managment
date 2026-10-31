@@ -46,8 +46,26 @@ export class AppointmentController {
 
   public deleteStaffBlock = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      await this.appointmentService.deleteStaffBlock(req.ctx, req.params.blockId);
+      await this.appointmentService.deleteStaffBlock(req.ctx, req.params.branchId, req.params.blockId);
       res.json({ success: true });
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  public reschedule = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const result = await this.appointmentService.rescheduleAppointment(req.ctx, req.params.id, req.body);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  public getAvailability = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const result = await this.appointmentService.getAvailability(req.ctx, req.params.branchId, req.query as any);
+      res.json(result);
     } catch (err) {
       next(err);
     }

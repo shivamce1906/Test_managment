@@ -75,6 +75,26 @@ export const updateServiceSchema = z.object({
   active: z.boolean().optional(),
 });
 
+// PATCH /services/:id/branch-prices — pricePaise null clears the override (base price applies)
+export const setBranchPriceSchema = z.object({
+  branchId: objectIdSchema,
+  pricePaise: z.number().int().nonnegative().nullable().optional(),
+  active: z.boolean().optional(),
+}).refine((b) => b.pricePaise !== undefined || b.active !== undefined, {
+  message: 'Send pricePaise and/or active',
+});
+
+export const listServicesQuerySchema = z.object({
+  branchId: objectIdSchema.optional(),
+  categoryId: objectIdSchema.optional(),
+  search: z.string().trim().max(100).optional(),
+  active: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
+});
+
+export const listCategoriesQuerySchema = z.object({
+  active: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
+});
+
 export const bulkPricePreviewSchema = z.object({
   categoryId: objectIdSchema,
   branchId: objectIdSchema.optional(),

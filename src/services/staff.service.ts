@@ -1,8 +1,9 @@
 import { Types } from 'mongoose';
-import { Staff, Roster, Attendance, Leave, Advance, Expense, withTransaction } from '../models';
-import { AppError, ErrorCode, getBusinessDate, normalizePhone } from '../utils';
+import { Staff, Roster, Attendance, Leave, Advance, Expense, Branch, Service, withTransaction } from '../models';
+import { AppError, ErrorCode, getBusinessDate, getIstDayOfWeek, normalizePhone, parseIstDateTime } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
+import { assertRefsInBusiness } from './tenant-refs';
 import { z } from 'zod';
 import {
   createStaffSchema,
@@ -21,6 +22,12 @@ export async function createStaff(
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
+
+  if (ctx.role === 'manager' && !ctx.branchIds.includes(input.branchId)) {
+    throw new AppError(403, ErrorCode.FORBIDDEN, 'Cannot add staff to a branch you do not manage');
+  }
+  await assertRefsInBusiness(Branch, ctx.businessId, [input.branchId], 'branches');
+  await assertRefsInBusiness(Service, ctx.businessId, input.serviceIds, 'services');
 
   const phone = normalizePhone(input.phone);
 
@@ -84,6 +91,15 @@ export async function updateStaff(
 
   const before = staff.toObject();
 
+  if (input.branchId) {
+    if (ctx.role === 'manager' && !ctx.branchIds.includes(input.branchId)) {
+      throw new AppError(403, ErrorCode.FORBIDDEN, 'Cannot move staff to a branch you do not manage');
+    }
+    await assertRefsInBusiness(Branch, ctx.businessId, [input.branchId], 'branches');
+  }
+  await assertRefsInBusiness(Service, ctx.businessId, input.serviceIds, 'services');
+  const movedBranch = !!input.branchId && input.branchId !== staff.branchId.toString();
+
   if (input.phone) {
     staff.phone = normalizePhone(input.phone);
   }
@@ -104,6 +120,14 @@ export async function updateStaff(
   (staff as any).updatedBy = toObjectId(ctx.userId);
   await staff.save();
 
+  // The roster follows the staff member to the new branch
+  if (movedBranch) {
+    await Roster.updateOne(
+      { businessId: staff.businessId, staffId: staff._id },
+      { $set: { branchId: staff.branchId } }
+    );
+  }
+
   await logAction({
     businessId: toObjectId(ctx.businessId),
     branchId: staff.branchId,
@@ -121,7 +145,7 @@ export async function updateStaff(
 
 export async function getStaffList(
   ctx: RequestContext,
-  filter?: { branchId?: string | Types.ObjectId; status?: 'active' | 'exited'; designation?: string }
+  filter?: { branchId?: string | Types.ObjectId; status?: 'active' | 'exited'; designation?: string; q?: string }
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
@@ -131,6 +155,10 @@ export async function getStaffList(
   if (filter?.branchId) query.branchId = toObjectId(filter.branchId);
   if (filter?.status) query.status = filter.status;
   if (filter?.designation) query.designation = filter.designation;
+  if (filter?.q) {
+    const text = filter.q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    query.$or = [{ name: { $regex: text, $options: 'i' } }, { phone: { $regex: text.replace(/\D/g, '') || text } }];
+  }
 
   return Staff.find(query).sort({ name: 1 });
 }
@@ -162,7 +190,10 @@ export async function getBilledByStaff(
     businessId: toObjectId(ctx.businessId),
     branchId: toObjectId(branchId),
     status: 'active',
-  }).select('_id name designation phone');
+    designation: 'receptionist',
+  })
+    .select('_id name designation phone')
+    .sort({ name: 1 });
 }
 
 // ----------------------------------------------------
@@ -312,6 +343,27 @@ export async function markAttendance(
     );
   }
 
+  const staffIds = [...new Set(input.entries.map((e) => e.staffId))];
+  const branchStaff = await Staff.countDocuments({
+    businessId: toObjectId(ctx.businessId),
+    branchId: toObjectId(branchId),
+    _id: { $in: staffIds.map(toObjectId) },
+  });
+  if (branchStaff !== staffIds.length) {
+    throw new AppError(404, ErrorCode.NOT_FOUND, 'One or more staff members are not in this branch');
+  }
+  for (const entry of input.entries) {
+    if (entry.inAt && entry.outAt && new Date(entry.outAt) <= new Date(entry.inAt)) {
+      throw new AppError(400, ErrorCode.VALIDATION_ERROR, 'Clock-out must be after clock-in', {
+        fields: { outAt: 'Clock-out must be after clock-in' },
+      });
+    }
+  }
+
+  const rosters = await Roster.find({ businessId: toObjectId(ctx.businessId), staffId: { $in: staffIds.map(toObjectId) } });
+  const rosterByStaff = new Map(rosters.map((r) => [r.staffId.toString(), r]));
+  const dayOfWeek = getIstDayOfWeek(parseIstDateTime(businessDate, '12:00'));
+
   const results = [];
 
   for (const entry of input.entries) {
@@ -327,11 +379,9 @@ export async function markAttendance(
 
     let overtimeMin = 0;
     if (inAt && outAt) {
-      const diffMs = outAt.getTime() - inAt.getTime();
-      const hoursWorked = diffMs / (1000 * 60 * 60);
-      if (hoursWorked > 9) {
-        overtimeMin = Math.round((hoursWorked - 9) * 60);
-      }
+      const workedMin = Math.round((outAt.getTime() - inAt.getTime()) / 60000);
+      const shiftMin = rosteredShiftMinutes(rosterByStaff.get(entry.staffId), businessDate, dayOfWeek);
+      overtimeMin = Math.max(0, workedMin - shiftMin);
     }
 
     if (!record) {
@@ -395,21 +445,38 @@ export async function markAttendance(
   return results;
 }
 
+/** Minutes the staff member is rostered for on a date (override first, then weekly); 9 h without a roster. */
+function rosteredShiftMinutes(roster: any, businessDate: string, dayOfWeek: number): number {
+  if (!roster) return 9 * 60;
+  const slot =
+    (roster.overrides || []).find((o: any) => o.date === businessDate) ||
+    (roster.weekly || []).find((d: any) => d.day === dayOfWeek);
+  if (!slot) return 9 * 60;
+  if (slot.off || !slot.start || !slot.end) return 0;
+  const toMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+  return Math.max(0, toMin(slot.end) - toMin(slot.start));
+}
+
 // ----------------------------------------------------
 // Leaves
 // ----------------------------------------------------
 
 export async function createLeave(
   ctx: RequestContext,
+  branchId: string,
   input: z.infer<typeof createLeaveSchema>
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const staff = await Staff.findOne({ _id: toObjectId(input.staffId), businessId: toObjectId(ctx.businessId) });
+  const staff = await Staff.findOne({
+    _id: toObjectId(input.staffId),
+    businessId: toObjectId(ctx.businessId),
+    branchId: toObjectId(branchId),
+  });
   if (!staff) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff member not found');
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff member not found in this branch');
   }
 
   const leave = await Leave.create({
@@ -495,6 +562,7 @@ export async function getLeaves(
 
 export async function createAdvance(
   ctx: RequestContext,
+  branchId: string,
   input: z.infer<typeof createAdvanceSchema>
 ) {
   if (!ctx.businessId) {
@@ -504,9 +572,9 @@ export async function createAdvance(
   const businessId = toObjectId(ctx.businessId);
   const userId = toObjectId(ctx.userId);
 
-  const staff = await Staff.findOne({ _id: toObjectId(input.staffId), businessId });
+  const staff = await Staff.findOne({ _id: toObjectId(input.staffId), businessId, branchId: toObjectId(branchId) });
   if (!staff) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff member not found');
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff member not found in this branch');
   }
 
   return withTransaction(async (session) => {

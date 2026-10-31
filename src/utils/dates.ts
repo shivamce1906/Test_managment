@@ -90,3 +90,10 @@ export function getDaysInMonth(yearOrYearMonth: string | number, monthNum?: numb
   }
   return new Date(Date.UTC(yearOrYearMonth, monthNum!, 0)).getUTCDate();
 }
+
+/** Adds whole days to a business date "YYYY-MM-DD" (calendar arithmetic, no time zone involved). */
+export function addDays(businessDate: string, days: number): string {
+  const d = new Date(`${businessDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}

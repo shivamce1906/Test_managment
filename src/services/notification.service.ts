@@ -1,6 +1,6 @@
 import { Types } from 'mongoose';
 import { Notification } from '../models';
-import { AppError, ErrorCode } from '../utils';
+import { AppError, ErrorCode, logger } from '../utils';
 import { RequestContext } from './context';
 import { getRedisClient } from '../integrations';
 
@@ -76,13 +76,21 @@ export async function markAllNotificationsRead(ctx: RequestContext) {
 // Redis Scope Counters for Polling /changes
 // ----------------------------------------------------
 
+/**
+ * Bumps a change counter so open screens know to refetch. Best-effort: Redis being down must
+ * never fail the bill or booking that triggered it (screens then refresh on their next poll).
+ */
 export async function bumpScopeCounter(
   businessId: Types.ObjectId | string,
   scope: ChangeScope
-) {
-  const redis = getRedisClient();
+): Promise<number | null> {
   const key = `chg:${businessId.toString()}:${scope}`;
-  return redis.incr(key);
+  try {
+    return await getRedisClient().incr(key);
+  } catch (err) {
+    logger.warn({ err, key }, 'Change counter bump failed');
+    return null;
+  }
 }
 
 export async function getChanges(

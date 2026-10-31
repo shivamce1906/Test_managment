@@ -25,6 +25,10 @@ if (!loaded) {
 
 export const env = {
   NODE_ENV: process.env.NODE_ENV || 'development',
+  // Build the unique/lookup indexes declared on the schemas when connecting (creates missing ones,
+  // never drops). On by default only in tests; enable for a real database once it has been
+  // checked for duplicates (scripts/check-duplicates.ts).
+  DB_AUTO_INDEX: process.env.DB_AUTO_INDEX ? process.env.DB_AUTO_INDEX === 'true' : process.env.NODE_ENV === 'test',
   PORT: Number(process.env.PORT) || 4000,
   // Standalone MongoDB default URI (For Replica Set, use: mongodb://localhost:27017/glox_salon?replicaSet=rs0)
   MONGODB_URI: process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/glox_salon',

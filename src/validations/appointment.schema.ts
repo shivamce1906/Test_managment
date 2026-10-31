@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { objectIdSchema } from './common.schema';
+import { objectIdSchema, isoDateSchema } from './common.schema';
 
 export const appointmentLineSchema = z.object({
   serviceId: objectIdSchema,
@@ -34,10 +34,10 @@ export const walkInAppointmentSchema = z.object({
 export const createWalkInSchema = walkInAppointmentSchema;
 
 export const updateAppointmentSchema = z.object({
-  lines: z.array(appointmentLineSchema).optional(),
+  lines: z.array(appointmentLineSchema).min(1).optional(),
   notes: z.string().optional(),
   __v: z.number().int(),
-});
+}).refine((b) => b.lines !== undefined || b.notes !== undefined, { message: 'Send lines and/or notes' });
 
 export const appointmentStatusSchema = z.object({
   status: z.enum(['booked', 'confirmed', 'arrived', 'in_service', 'completed', 'billed', 'cancelled', 'no_show']),
@@ -51,4 +51,22 @@ export const createStaffBlockSchema = z.object({
   start: z.string().datetime(),
   end: z.string().datetime(),
   reason: z.string().min(1, 'Reason is required'),
+}).refine((b) => new Date(b.end) > new Date(b.start), { path: ['end'], message: 'end must be after start' });
+
+export const listAppointmentsQuerySchema = z.object({
+  from: isoDateSchema.optional(),
+  to: isoDateSchema.optional(),
+  staffId: objectIdSchema.optional(),
+  customerId: objectIdSchema.optional(),
+  status: z.enum(['booked', 'confirmed', 'arrived', 'in_service', 'completed', 'billed', 'cancelled', 'no_show']).optional(),
+}).refine((q) => !q.from || !q.to || (q.to >= q.from && (Date.parse(q.to) - Date.parse(q.from)) / 86400000 <= 31), {
+  path: ['to'],
+  message: 'to must be on or after from, at most 31 days later',
+});
+
+export const availabilityQuerySchema = z.object({
+  serviceId: objectIdSchema,
+  date: isoDateSchema,
+  staffId: objectIdSchema.optional(),
+  stepMin: z.coerce.number().int().refine((n) => [5, 10, 15, 30, 60].includes(n), 'stepMin must be 5, 10, 15, 30 or 60').optional(),
 });

@@ -8,11 +8,25 @@ import {
   StockAudit,
   Branch,
   Counter,
+  Vendor,
   withTransaction,
 } from '../models';
 import { AppError, ErrorCode, getBusinessDate } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
+import { assertRefsInBusiness } from './tenant-refs';
+
+/** Managers act only for their assigned branches (owners for all). */
+function assertManages(ctx: RequestContext, branchId: Types.ObjectId | string, what: string): void {
+  if (ctx.role === 'manager' && !ctx.branchIds.includes(branchId.toString())) {
+    throw new AppError(403, ErrorCode.FORBIDDEN, `You do not manage the branch for this ${what}`);
+  }
+}
+
+/** Which stock pools a product type can live in. */
+const POOLS_FOR: Record<string, string[]> = { retail: ['retail'], consumable: ['consumable'], both: ['retail', 'consumable'] };
+
+const unitCost = (product: any) => (product?.purchasePricePaise || 0) / (product?.unitsPerPurchase || 1);
 import { z } from 'zod';
 import {
   stockAdjustmentSchema,
@@ -32,7 +46,7 @@ import {
 export async function getStockBalances(
   ctx: RequestContext,
   branchId: string | Types.ObjectId,
-  filter?: { pool?: 'retail' | 'consumable'; productId?: string | Types.ObjectId }
+  filter?: { pool?: 'retail' | 'consumable'; productId?: string | Types.ObjectId; lowOnly?: boolean }
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
@@ -43,7 +57,19 @@ export async function getStockBalances(
   if (filter?.pool) query.pool = filter.pool;
   if (filter?.productId) query.productId = toObjectId(filter.productId);
 
-  return StockBalance.find(query).populate('productId');
+  const balances = await StockBalance.find(query).populate('productId', 'name brand type sku useUnit purchaseUnit unitsPerPurchase reorderLevels purchasePricePaise sellingPricePaise active');
+  const rows = balances.map((b: any) => {
+    const product = b.productId;
+    const reorder = product?.reorderLevels?.find((r: any) => r.branchId.toString() === branchId.toString());
+    const reorderLevel = reorder?.qty ?? null;
+    return {
+      ...b.toObject(),
+      reorderLevel,
+      low: reorderLevel !== null && b.qty <= reorderLevel,
+      valuePaise: Math.round(unitCost(product) * Math.max(0, b.qty)),
+    };
+  });
+  return filter?.lowOnly ? rows.filter((r) => r.low) : rows;
 }
 
 export async function getStockMovements(
@@ -91,6 +117,14 @@ export async function adjustStock(
   if (!product) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Product not found');
   }
+  if (!POOLS_FOR[product.type]?.includes(input.pool)) {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, `${product.name} is a ${product.type} product and has no ${input.pool} stock`, {
+      fields: { pool: `Use ${POOLS_FOR[product.type].join(' or ')}` },
+    });
+  }
+  if (input.type === 'internal_use' && input.qty > 0) {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Internal use takes stock out: qty must be negative', { fields: { qty: 'Use a negative quantity' } });
+  }
 
   return withTransaction(async (session) => {
     const balance = await StockBalance.findOneAndUpdate(
@@ -116,7 +150,7 @@ export async function adjustStock(
           pool: input.pool,
           type: input.type,
           qty: input.qty,
-          costPaise: 0,
+          costPaise: Math.round(unitCost(product) * Math.abs(input.qty)),
           reason: input.reason,
           businessDate: getBusinessDate(),
           createdBy: userId,
@@ -155,9 +189,15 @@ export async function createPurchaseOrder(
   const businessId = toObjectId(ctx.businessId);
   const userId = toObjectId(ctx.userId);
 
+  assertManages(ctx, input.branchId, 'purchase order');
   const branch = await Branch.findOne({ _id: toObjectId(input.branchId), businessId });
   if (!branch) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Branch not found');
+  }
+  await assertRefsInBusiness(Vendor, businessId, [input.vendorId], 'vendors');
+  await assertRefsInBusiness(Product, businessId, input.items.map((i) => i.productId), 'products');
+  if (new Set(input.items.map((i) => i.productId)).size !== input.items.length) {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Each product may appear once on a purchase order');
   }
 
   return withTransaction(async (session) => {
@@ -230,8 +270,9 @@ export async function approvePurchaseOrder(
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Purchase order not found');
   }
 
+  assertManages(ctx, po.branchId, 'purchase order');
   if (po.status !== 'pending_approval') {
-    throw new AppError(400, ErrorCode.BAD_REQUEST, `Cannot approve PO in ${po.status} status`);
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, `Cannot approve a PO that is ${po.status.replace('_', ' ')}`);
   }
 
   po.status = 'approved';
@@ -272,8 +313,9 @@ export async function rejectPurchaseOrder(
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Purchase order not found');
   }
 
+  assertManages(ctx, po.branchId, 'purchase order');
   if (po.status !== 'pending_approval') {
-    throw new AppError(400, ErrorCode.BAD_REQUEST, `Cannot reject PO in ${po.status} status`);
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, `Cannot reject a PO that is ${po.status.replace('_', ' ')}`);
   }
 
   po.status = 'rejected';
@@ -317,8 +359,9 @@ export async function receivePurchaseOrder(
       throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Purchase order not found');
     }
 
+    assertManages(ctx, po.branchId, 'purchase order');
     if (po.status !== 'approved' && po.status !== 'partly_received') {
-      throw new AppError(400, ErrorCode.BAD_REQUEST, `PO cannot receive goods in ${po.status} status`);
+      throw new AppError(422, ErrorCode.INVALID_TRANSITION, `A PO that is ${po.status.replace('_', ' ')} cannot receive goods`);
     }
 
     const businessDate = getBusinessDate();
@@ -326,7 +369,13 @@ export async function receivePurchaseOrder(
     for (const receiptItem of input.items) {
       const item = po.items.find((it) => it.productId.toString() === receiptItem.productId.toString());
       if (!item) {
-        throw new AppError(400, ErrorCode.BAD_REQUEST, `Product ${receiptItem.productId} not found in this PO`);
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, `Product ${receiptItem.productId} is not on this PO`);
+      }
+      const remaining = item.qtyPurchaseUnits - item.receivedPurchaseUnits;
+      if (receiptItem.qty > remaining) {
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, `Only ${remaining} purchase unit(s) of this product are still due on the PO`, {
+          details: { productId: receiptItem.productId, remaining },
+        });
       }
 
       item.receivedPurchaseUnits += receiptItem.qty;
@@ -334,7 +383,8 @@ export async function receivePurchaseOrder(
       const product = await Product.findOne({ _id: toObjectId(receiptItem.productId), businessId }).session(session);
       const unitsPerPurchase = product?.unitsPerPurchase || 1;
       const useUnitsQty = receiptItem.qty * unitsPerPurchase;
-      const targetPool = product?.type === 'retail' ? 'retail' : 'consumable';
+      // 'both' products go to the pool named on the receipt (retail by default)
+      const targetPool = product?.type === 'consumable' ? 'consumable' : product?.type === 'both' ? receiptItem.pool || 'retail' : 'retail';
 
       await StockBalance.findOneAndUpdate(
         {
@@ -359,7 +409,8 @@ export async function receivePurchaseOrder(
             pool: targetPool,
             type: 'purchase',
             qty: useUnitsQty,
-            costPaise: item.ratePaise / unitsPerPurchase,
+            // Total cost of this receipt line, rounded once to whole paise
+            costPaise: Math.round(item.ratePaise * receiptItem.qty),
             refType: 'purchaseOrder',
             refId: po._id,
             batch: receiptItem.batch,
@@ -420,8 +471,16 @@ export async function recordVendorBill(
   if (!po) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Purchase order not found');
   }
+  assertManages(ctx, po.branchId, 'purchase order');
+  if (input.paidPaise > input.amountPaise) {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Paid amount cannot be more than the bill amount', { fields: { paidPaise: 'More than the bill' } });
+  }
 
-  po.vendorBill = input;
+  // Payment status follows the amounts
+  po.vendorBill = {
+    ...input,
+    paymentStatus: input.paidPaise === 0 ? 'unpaid' : input.paidPaise >= input.amountPaise ? 'paid' : 'partly_paid',
+  };
   (po as any).updatedBy = userId;
   await po.save();
 
@@ -441,8 +500,7 @@ export async function recordVendorBill(
 
 export async function getPurchaseOrders(
   ctx: RequestContext,
-  branchId?: string | Types.ObjectId,
-  status?: string
+  filter: { branchId?: string; status?: string; vendorId?: string } = {}
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
@@ -450,12 +508,30 @@ export async function getPurchaseOrders(
   const businessId = toObjectId(ctx.businessId);
 
   const query: any = { businessId };
-  if (branchId) query.branchId = toObjectId(branchId);
-  if (status) query.status = status;
+  if (filter.branchId) {
+    assertManages(ctx, filter.branchId, 'purchase order');
+    query.branchId = toObjectId(filter.branchId);
+  } else if (ctx.role === 'manager') {
+    query.branchId = { $in: ctx.branchIds.map(toObjectId) };
+  }
+  if (filter.status) query.status = filter.status;
+  if (filter.vendorId) query.vendorId = toObjectId(filter.vendorId);
 
   return PurchaseOrder.find(query)
-    .populate('vendorId', 'name contactPerson phone')
+    .populate('vendorId', 'name contact phone')
+    .populate('branchId', 'name code')
     .sort({ createdAt: -1 });
+}
+
+export async function getPurchaseOrderById(ctx: RequestContext, poId: string) {
+  const businessId = toObjectId(ctx.businessId!);
+  const po = await PurchaseOrder.findOne({ _id: toObjectId(poId), businessId })
+    .populate('vendorId', 'name contact phone gstin')
+    .populate('branchId', 'name code')
+    .populate('items.productId', 'name brand type purchaseUnit useUnit unitsPerPurchase');
+  if (!po) throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Purchase order not found');
+  assertManages(ctx, (po.branchId as any)._id || po.branchId, 'purchase order');
+  return po;
 }
 
 // ----------------------------------------------------
@@ -471,6 +547,19 @@ export async function createTransfer(
   }
   const businessId = toObjectId(ctx.businessId);
   const userId = toObjectId(ctx.userId);
+
+  await assertRefsInBusiness(Branch, businessId, [input.fromBranchId, input.toBranchId], 'branches');
+  if (ctx.role === 'manager' && !ctx.branchIds.includes(input.fromBranchId) && !ctx.branchIds.includes(input.toBranchId)) {
+    throw new AppError(403, ErrorCode.FORBIDDEN, 'You manage neither branch of this transfer');
+  }
+  const products = await Product.find({ businessId, _id: { $in: input.items.map((i) => toObjectId(i.productId)) } });
+  for (const it of input.items) {
+    const p = products.find((x) => x._id.toString() === it.productId);
+    if (!p) throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'One or more products were not found in this business');
+    if (!POOLS_FOR[p.type].includes(it.pool)) {
+      throw new AppError(422, ErrorCode.VALIDATION_ERROR, `${p.name} has no ${it.pool} stock`);
+    }
+  }
 
   return withTransaction(async (session) => {
     const counter = await Counter.findOneAndUpdate(
@@ -538,8 +627,10 @@ export async function approveTransfer(
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Transfer not found');
   }
 
+  // The sending branch approves (it is the one giving stock away)
+  assertManages(ctx, transfer.fromBranchId, 'transfer (approval is done by the sending branch)');
   if (transfer.status !== 'requested') {
-    throw new AppError(400, ErrorCode.BAD_REQUEST, `Cannot approve transfer in ${transfer.status} status`);
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, `Cannot approve a transfer that is ${transfer.status}`);
   }
 
   transfer.status = 'approved';
@@ -580,8 +671,9 @@ export async function dispatchTransfer(
       throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Transfer not found');
     }
 
+    assertManages(ctx, transfer.fromBranchId, 'transfer (dispatch is done by the sending branch)');
     if (transfer.status !== 'approved') {
-      throw new AppError(400, ErrorCode.BAD_REQUEST, `Cannot dispatch transfer in ${transfer.status} status`);
+      throw new AppError(422, ErrorCode.INVALID_TRANSITION, `Cannot dispatch a transfer that is ${transfer.status}`);
     }
 
     const businessDate = getBusinessDate();
@@ -596,7 +688,7 @@ export async function dispatchTransfer(
 
       if (!balance || balance.qty < item.qty) {
         throw new AppError(
-          400,
+          422,
           ErrorCode.INSUFFICIENT_STOCK,
           `Insufficient stock in source branch for product ${item.productId}`
         );
@@ -615,6 +707,7 @@ export async function dispatchTransfer(
             pool: item.pool,
             type: 'transfer_out',
             qty: -item.qty,
+            costPaise: Math.round(unitCost(await Product.findOne({ _id: item.productId, businessId }).session(session)) * item.qty),
             refType: 'transfer',
             refId: transfer._id,
             businessDate,
@@ -666,8 +759,16 @@ export async function receiveTransfer(
       throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Transfer not found');
     }
 
+    assertManages(ctx, transfer.toBranchId, 'transfer (receiving is done by the receiving branch)');
     if (transfer.status !== 'dispatched') {
-      throw new AppError(400, ErrorCode.BAD_REQUEST, `Cannot receive transfer in ${transfer.status} status`);
+      throw new AppError(422, ErrorCode.INVALID_TRANSITION, `Cannot receive a transfer that is ${transfer.status}`);
+    }
+
+    // Every dispatched line is accounted for once: received in full, or short with a reason
+    for (const item of transfer.items) {
+      if (!input.items.some((r) => r.productId.toString() === item.productId.toString())) {
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Every product on the transfer must be in the receipt (send 0 with a reason if nothing arrived)');
+      }
     }
 
     const businessDate = getBusinessDate();
@@ -675,13 +776,21 @@ export async function receiveTransfer(
     for (const recItem of input.items) {
       const item = transfer.items.find((it) => it.productId.toString() === recItem.productId.toString());
       if (!item) {
-        throw new AppError(400, ErrorCode.BAD_REQUEST, `Product ${recItem.productId} not found in this transfer`);
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, `Product ${recItem.productId} is not on this transfer`);
+      }
+      if (recItem.receivedQty > item.qty) {
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, `Received more than the ${item.qty} dispatched`, { details: { productId: recItem.productId, dispatched: item.qty } });
+      }
+      if (recItem.receivedQty < item.qty && !recItem.mismatchReason?.trim()) {
+        throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'A short receipt needs a mismatch reason', { fields: { mismatchReason: 'Why fewer arrived' } });
       }
 
       item.receivedQty = recItem.receivedQty;
       if (recItem.mismatchReason) {
         item.mismatchReason = recItem.mismatchReason;
       }
+
+      if (recItem.receivedQty === 0) continue;
 
       await StockBalance.findOneAndUpdate(
         {
@@ -755,6 +864,10 @@ export async function getTransfers(
     const bId = toObjectId(filter.branchId);
     query.$or = [{ fromBranchId: bId }, { toBranchId: bId }];
   }
+  if (ctx.role === 'manager') {
+    const mine = ctx.branchIds.map(toObjectId);
+    query.$and = [{ $or: [{ fromBranchId: { $in: mine } }, { toBranchId: { $in: mine } }] }];
+  }
   if (filter?.status) query.status = filter.status;
 
   return Transfer.find(query)
@@ -778,7 +891,9 @@ export async function createStockAudit(
   const businessId = toObjectId(ctx.businessId);
   const userId = toObjectId(ctx.userId);
 
-  const products = await Product.find({ businessId, active: true });
+  assertManages(ctx, branchId, 'stock audit');
+  const types = input.pool === 'retail' ? ['retail', 'both'] : ['consumable', 'both'];
+  const products = await Product.find({ businessId, active: true, type: { $in: types } }).sort({ name: 1 });
   const balances = await StockBalance.find({
     businessId,
     branchId: toObjectId(branchId),
@@ -833,11 +948,16 @@ export async function updateStockAuditCounts(
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Stock audit not found');
   }
 
+  assertManages(ctx, audit.branchId, 'stock audit');
   if (audit.status === 'approved') {
-    throw new AppError(400, ErrorCode.BAD_REQUEST, 'Cannot modify counts of an approved audit');
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, 'Cannot modify counts of an approved audit');
   }
 
   const countMap = new Map(input.lines.map((l) => [l.productId.toString(), l.countedQty]));
+  const onSheet = new Set(audit.lines.map((l) => l.productId.toString()));
+  if ([...countMap.keys()].some((id) => !onSheet.has(id))) {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'A counted product is not on this count sheet');
+  }
 
   for (const line of audit.lines) {
     if (countMap.has(line.productId.toString())) {
@@ -878,8 +998,9 @@ export async function approveStockAudit(
       throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Stock audit not found');
     }
 
+    assertManages(ctx, audit.branchId, 'stock audit');
     if (audit.status !== 'submitted') {
-      throw new AppError(400, ErrorCode.BAD_REQUEST, `Cannot approve audit in ${audit.status} status`);
+      throw new AppError(422, ErrorCode.INVALID_TRANSITION, `Cannot approve an audit that is ${audit.status}`);
     }
 
     const businessDate = getBusinessDate();
@@ -895,8 +1016,10 @@ export async function approveStockAudit(
             productId: line.productId,
             pool: audit.pool,
           },
+          // Apply the variance (not an absolute value) so sales after the count still count
           {
-            $set: { qty: line.countedQty, lastMovementAt: new Date() },
+            $inc: { qty: delta },
+            $set: { lastMovementAt: new Date() },
           },
           { upsert: true, session }
         );
@@ -910,6 +1033,7 @@ export async function approveStockAudit(
               pool: audit.pool,
               type: 'audit',
               qty: delta,
+              costPaise: Math.round(unitCost(await Product.findOne({ _id: line.productId, businessId }).session(session)) * Math.abs(delta)),
               refType: 'stockAudit',
               refId: audit._id,
               reason: 'Audit discrepancy correction',

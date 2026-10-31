@@ -44,8 +44,9 @@ describe('Billing atomicity (transactions)', () => {
       lines: [{ kind: 'product', refId: w.retail._id.toString(), qty: 1 }, { kind: 'membership', refId: plan._id.toString() }],
       payments: [{ mode: 'cash', amountPaise: 295000 }],
     };
-    await as(w.tokens.owner).post(`/branches/${w.branchA._id}/bills`, body);
-    await as(w.tokens.owner).post(`/branches/${w.branchA._id}/bills`, body);
+    // A client retry re-sends the same Idempotency-Key; that is what makes it the same bill
+    await as(w.tokens.owner).post(`/branches/${w.branchA._id}/bills`, body).set('Idempotency-Key', 'retry-1');
+    await as(w.tokens.owner).post(`/branches/${w.branchA._id}/bills`, body).set('Idempotency-Key', 'retry-1');
     expect(await Bill.countDocuments({ businessId: w.business._id, status: 'paid' })).toBeLessThanOrEqual(1);
   });
 

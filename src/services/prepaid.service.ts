@@ -1,8 +1,9 @@
 import { Types } from 'mongoose';
-import { Plan, CustomerPlan, Customer, WalletLedger, LoyaltyLedger, withTransaction } from '../models';
-import { AppError, ErrorCode, getBusinessDate } from '../utils';
+import { Plan, CustomerPlan, Customer, WalletLedger, LoyaltyLedger, Service, Branch, Business, withTransaction } from '../models';
+import { AppError, ErrorCode, getBusinessDate, maskPhone } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
+import { assertRefsInBusiness } from './tenant-refs';
 import { z } from 'zod';
 import {
   createPlanSchema,
@@ -19,6 +20,9 @@ export async function createPlan(
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
+
+  await assertRefsInBusiness(Service, ctx.businessId, input.package?.items.map((i) => i.serviceId), 'services');
+  await assertRefsInBusiness(Branch, ctx.businessId, input.branchScope, 'branches');
 
   const plan = await Plan.create({
     businessId: toObjectId(ctx.businessId),
@@ -57,8 +61,14 @@ export async function updatePlan(
 
   const before = plan.toObject();
 
+  // Price and contents are fixed once a plan exists (sold plans keep a snapshot anyway); create a new plan to change them
   if (input.name !== undefined) plan.name = input.name;
   if (input.active !== undefined) plan.active = input.active;
+  if (input.validityDays !== undefined) plan.validityDays = input.validityDays;
+  if (input.branchScope !== undefined) {
+    await assertRefsInBusiness(Branch, ctx.businessId, input.branchScope, 'branches');
+    plan.branchScope = input.branchScope.map(toObjectId) as any;
+  }
   (plan as any).updatedBy = toObjectId(ctx.userId);
 
   await plan.save();
@@ -127,7 +137,7 @@ export async function extendCustomerPlan(
   }
 
   if (plan.status === 'cancelled' || plan.status === 'transferred') {
-    throw new AppError(400, ErrorCode.INVALID_STATE_TRANSITION, `Cannot extend ${plan.status} plan`);
+    throw new AppError(422, ErrorCode.INVALID_STATE_TRANSITION, `Cannot extend ${plan.status} plan`);
   }
 
   const before = plan.toObject();
@@ -185,7 +195,7 @@ export async function freezeCustomerPlan(
   }
 
   if (plan.status !== 'active') {
-    throw new AppError(400, ErrorCode.INVALID_STATE_TRANSITION, 'Only active plans can be frozen');
+    throw new AppError(422, ErrorCode.INVALID_STATE_TRANSITION, 'Only active plans can be frozen');
   }
 
   const before = plan.toObject();
@@ -229,7 +239,7 @@ export async function unfreezeCustomerPlan(
   }
 
   if (plan.status !== 'frozen') {
-    throw new AppError(400, ErrorCode.INVALID_STATE_TRANSITION, 'Only frozen plans can be unfrozen');
+    throw new AppError(422, ErrorCode.INVALID_STATE_TRANSITION, 'Only frozen plans can be unfrozen');
   }
 
   const before = plan.toObject();
@@ -289,7 +299,7 @@ export async function transferCustomerPlan(
   }
 
   if (plan.status !== 'active') {
-    throw new AppError(400, ErrorCode.INVALID_STATE_TRANSITION, 'Only active plans can be transferred');
+    throw new AppError(422, ErrorCode.INVALID_STATE_TRANSITION, 'Only active plans can be transferred');
   }
 
   if (plan.customerId.toString() === toCustomerId.toString()) {
@@ -334,10 +344,16 @@ export async function getCustomerPlans(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  return CustomerPlan.find({
-    businessId: toObjectId(ctx.businessId),
-    customerId: toObjectId(customerId),
-  }).sort({ createdAt: -1 });
+  const businessId = toObjectId(ctx.businessId);
+  if (!(await Customer.exists({ _id: toObjectId(customerId), businessId }))) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Customer not found');
+  }
+  // Plans past their validity show as expired (the nightly job does the same for everyone)
+  await CustomerPlan.updateMany(
+    { businessId, customerId: toObjectId(customerId), status: 'active', validTill: { $lt: getBusinessDate() } },
+    { $set: { status: 'expired' } }
+  );
+  return CustomerPlan.find({ businessId, customerId: toObjectId(customerId) }).sort({ createdAt: -1 });
 }
 
 export async function getCustomerPlanById(
@@ -403,7 +419,9 @@ export async function adjustWallet(
 
     const newBalance = customer.walletBalancePaise + amountPaise;
     if (newBalance < 0) {
-      throw new AppError(400, ErrorCode.INSUFFICIENT_WALLET_BALANCE, 'Wallet balance cannot be negative');
+      throw new AppError(422, ErrorCode.INSUFFICIENT_WALLET_BALANCE, 'Wallet balance cannot be negative', {
+        details: { balancePaise: customer.walletBalancePaise },
+      });
     }
 
     customer.walletBalancePaise = newBalance;
@@ -472,7 +490,7 @@ export async function lookupVoucher(
   const voucher = await CustomerPlan.findOne({
     businessId: toObjectId(ctx.businessId),
     voucherCode: code.toUpperCase().trim(),
-  }).populate('customerId');
+  }).populate('customerId', 'name phone');
 
   if (!voucher) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Voucher not found');
@@ -480,11 +498,53 @@ export async function lookupVoucher(
 
   const today = getBusinessDate();
   if (voucher.validTill < today) {
-    throw new AppError(400, ErrorCode.BAD_REQUEST, 'Voucher has expired');
+    throw new AppError(422, 'PLAN_INACTIVE', `Voucher expired on ${voucher.validTill}`);
   }
   if (voucher.status !== 'active') {
-    throw new AppError(400, ErrorCode.BAD_REQUEST, `Voucher is ${voucher.status}`);
+    throw new AppError(422, 'PLAN_INACTIVE', `Voucher is ${voucher.status.replace('_', ' ')}`);
   }
 
-  return voucher;
+  const obj: any = voucher.toObject();
+  if (obj.customerId?.phone && (ctx.role === 'manager' || ctx.role === 'branch')) {
+    obj.customerId.phone = maskPhone(obj.customerId.phone);
+  }
+  return obj;
+}
+
+/**
+ * Wallet screen: current balance and the latest ledger rows (newest first).
+ */
+export async function getWalletSummary(ctx: RequestContext, customerId: string, limit = 50) {
+  const businessId = toObjectId(ctx.businessId!);
+  const customer = await Customer.findOne({ _id: toObjectId(customerId), businessId }).select('name walletBalancePaise');
+  if (!customer) throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Customer not found');
+  const ledger = await WalletLedger.find({ businessId, customerId: customer._id }).sort({ createdAt: -1 }).limit(limit);
+  return { customerId: customer._id, balancePaise: customer.walletBalancePaise, ledger };
+}
+
+/**
+ * Loyalty screen: points, what they are worth now, the business rules and the latest ledger rows.
+ */
+export async function getLoyaltySummary(ctx: RequestContext, customerId: string, limit = 50) {
+  const businessId = toObjectId(ctx.businessId!);
+  const [customer, business] = await Promise.all([
+    Customer.findOne({ _id: toObjectId(customerId), businessId }).select('name loyaltyPoints'),
+    Business.findById(businessId).select('loyalty'),
+  ]);
+  if (!customer) throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Customer not found');
+  const loyalty: any = business?.loyalty || {};
+  const ledger = await LoyaltyLedger.find({ businessId, customerId: customer._id }).sort({ createdAt: -1 }).limit(limit);
+  return {
+    customerId: customer._id,
+    points: customer.loyaltyPoints,
+    valuePaise: customer.loyaltyPoints * (loyalty.redeemValuePaise || 0),
+    rules: {
+      enabled: !!loyalty.enabled,
+      earnPer100: loyalty.earnPer100,
+      redeemValuePaise: loyalty.redeemValuePaise,
+      minRedeem: loyalty.minRedeem,
+      expiryDays: loyalty.expiryDays,
+    },
+    ledger,
+  };
 }

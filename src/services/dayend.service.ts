@@ -12,6 +12,16 @@ import {
 import { AppError, ErrorCode, getBusinessDate } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
+
+/** Managers and branch logins only touch their own branches' expenses. */
+function assertBranchScope(ctx: RequestContext, branchId: Types.ObjectId): void {
+  if ((ctx.role === 'manager' || ctx.role === 'branch') && !ctx.branchIds.includes(branchId.toString())) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Expense not found');
+  }
+}
+
+/** Indian notes and coins in rupees, as used in the denominations count. */
+const DENOMINATIONS = ['2000', '500', '200', '100', '50', '20', '10', '5', '2', '1'];
 import { generateDayEndPdf, uploadPdf } from '../integrations';
 import { z } from 'zod';
 import {
@@ -37,6 +47,12 @@ export async function createExpense(
   }
 
   const businessDate = input.businessDate || getBusinessDate();
+  if (businessDate > getBusinessDate()) {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'An expense cannot be dated in the future', { fields: { businessDate: 'Future date' } });
+  }
+  if (input.paidFrom === 'till' && input.mode !== 'cash') {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Money paid from the till is cash', { fields: { mode: 'Use cash for till payments' } });
+  }
 
   // Check if day is already closed & approved
   const closure = await DayClosure.findOne({
@@ -46,7 +62,7 @@ export async function createExpense(
     status: 'approved',
   });
   if (closure) {
-    throw new AppError(400, ErrorCode.DAY_CLOSED, 'Cannot add expense to an approved closed day');
+    throw new AppError(409, ErrorCode.DAY_CLOSED, 'Cannot add expense to an approved closed day');
   }
 
   const expense = await Expense.create({
@@ -87,10 +103,11 @@ export async function updateExpense(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const expense = await Expense.findOne({ _id: toObjectId(expenseId), businessId: toObjectId(ctx.businessId) });
+  const expense = await Expense.findOne({ _id: toObjectId(expenseId), businessId: toObjectId(ctx.businessId), deletedAt: null });
   if (!expense) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Expense not found');
   }
+  assertBranchScope(ctx, expense.branchId);
 
   const closure = await DayClosure.findOne({
     businessId: toObjectId(ctx.businessId),
@@ -99,7 +116,12 @@ export async function updateExpense(
     status: 'approved',
   });
   if (closure) {
-    throw new AppError(400, ErrorCode.DAY_CLOSED, 'Cannot modify expense on an approved closed day');
+    throw new AppError(409, ErrorCode.DAY_CLOSED, 'Cannot modify expense on an approved closed day');
+  }
+  const mode = input.mode || expense.mode;
+  const paidFrom = input.paidFrom || expense.paidFrom;
+  if (paidFrom === 'till' && mode !== 'cash') {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Money paid from the till is cash', { fields: { mode: 'Use cash for till payments' } });
   }
 
   const before = expense.toObject();
@@ -137,10 +159,11 @@ export async function deleteExpense(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const expense = await Expense.findOne({ _id: toObjectId(expenseId), businessId: toObjectId(ctx.businessId) });
+  const expense = await Expense.findOne({ _id: toObjectId(expenseId), businessId: toObjectId(ctx.businessId), deletedAt: null });
   if (!expense) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Expense not found');
   }
+  assertBranchScope(ctx, expense.branchId);
 
   const closure = await DayClosure.findOne({
     businessId: toObjectId(ctx.businessId),
@@ -149,7 +172,7 @@ export async function deleteExpense(
     status: 'approved',
   });
   if (closure) {
-    throw new AppError(400, ErrorCode.DAY_CLOSED, 'Cannot delete expense on an approved closed day');
+    throw new AppError(409, ErrorCode.DAY_CLOSED, 'Cannot delete expense on an approved closed day');
   }
 
   const before = expense.toObject();
@@ -174,17 +197,22 @@ export async function deleteExpense(
 export async function getExpenses(
   ctx: RequestContext,
   branchId: string | Types.ObjectId,
-  filter?: { fromDate?: string; toDate?: string; category?: string }
+  filter?: { date?: string; from?: string; to?: string; fromDate?: string; toDate?: string; category?: string }
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const query: any = { businessId: toObjectId(ctx.businessId), branchId: toObjectId(branchId), deletedAt: { $exists: false } };
-  if (filter?.fromDate || filter?.toDate) {
+  // deletedAt defaults to null, so "not deleted" is deletedAt: null (not $exists: false)
+  const query: any = { businessId: toObjectId(ctx.businessId), branchId: toObjectId(branchId), deletedAt: null };
+  const from = filter?.from || filter?.fromDate;
+  const to = filter?.to || filter?.toDate;
+  if (filter?.date) {
+    query.businessDate = filter.date;
+  } else if (from || to) {
     query.businessDate = {};
-    if (filter?.fromDate) query.businessDate.$gte = filter.fromDate;
-    if (filter?.toDate) query.businessDate.$lte = filter.toDate;
+    if (from) query.businessDate.$gte = from;
+    if (to) query.businessDate.$lte = to;
   }
   if (filter?.category) query.category = filter.category;
 
@@ -254,7 +282,9 @@ export async function createPettyCashEntry(
   }
 
   const businessDate = getBusinessDate();
-
+  if (await DayClosure.exists({ businessId: toObjectId(ctx.businessId), branchId: toObjectId(branchId), businessDate, status: 'approved' })) {
+    throw new AppError(409, ErrorCode.DAY_CLOSED, 'Today is closed; reopen it to add petty-cash entries');
+  }
   const entry = await PettyCashEntry.create({
     businessId: toObjectId(ctx.businessId),
     branchId: toObjectId(branchId),
@@ -306,14 +336,20 @@ export async function calculateExpected(
     businessDate,
     type: 'float',
   });
-  const openingCashFloat = floatEntry ? floatEntry.amountPaise : 0;
+  // No float entry for the day: the branch's standing petty-cash float is the opening cash
+  let openingCashFloat = floatEntry ? floatEntry.amountPaise : 0;
+  if (!floatEntry) {
+    const branch = await Branch.findOne({ _id: brId, businessId: bId }).select('pettyCashFloatPaise');
+    openingCashFloat = branch?.pettyCashFloatPaise || 0;
+  }
 
   // 2. Bills on this date
   const bills = await Bill.find({
     businessId: bId,
     branchId: brId,
     businessDate,
-    status: { $in: ['paid', 'partly_paid', 'cancelled', 'refunded', 'partly_refunded'] },
+    // A refunded bill's payment was still taken; the refund is counted separately below
+    status: { $in: ['paid', 'partly_paid', 'refunded', 'partly_refunded'] },
   });
 
   let cashSales = 0;
@@ -325,7 +361,7 @@ export async function calculateExpected(
   let cardRefunds = 0;
 
   for (const bill of bills) {
-    if (bill.status === 'paid' || bill.status === 'partly_paid') {
+    {
       for (const p of bill.payments) {
         if (p.mode === 'cash') cashSales += p.amountPaise;
         else if (p.mode === 'upi') upiSales += p.amountPaise;
@@ -338,7 +374,12 @@ export async function calculateExpected(
       }
     }
 
+  }
+  // Refunds count on the day the money went out, whatever the bill's own date
+  const refundedBills = await Bill.find({ businessId: bId, branchId: brId, 'refunds.businessDate': businessDate });
+  for (const bill of refundedBills) {
     for (const r of bill.refunds || []) {
+      if (r.businessDate !== businessDate) continue;
       if (r.mode === 'cash') cashRefunds += r.amountPaise;
       else if (r.mode === 'upi') upiRefunds += r.amountPaise;
       else if (r.mode === 'card') cardRefunds += r.amountPaise;
@@ -369,7 +410,7 @@ export async function calculateExpected(
     businessId: bId,
     branchId: brId,
     businessDate,
-    deletedAt: { $exists: false },
+    deletedAt: null,
   });
 
   let cashExpenses = 0;
@@ -478,7 +519,22 @@ export async function submitDayClosure(
   });
 
   if (closure && closure.status === 'approved') {
-    throw new AppError(400, ErrorCode.DAY_CLOSED, 'Cannot resubmit an approved day closure');
+    throw new AppError(409, ErrorCode.DAY_CLOSED, 'Cannot resubmit an approved day closure');
+  }
+  if (businessDate > getBusinessDate()) {
+    throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'A future day cannot be closed');
+  }
+  // Note count × face value must equal the counted cash
+  const unknown = Object.keys(input.denominations).filter((k) => !DENOMINATIONS.includes(k));
+  if (unknown.length) {
+    throw new AppError(400, ErrorCode.VALIDATION_ERROR, `Unknown denomination(s): ${unknown.join(', ')}`, { fields: { denominations: `Use ${DENOMINATIONS.join(', ')}` } });
+  }
+  const denominationTotal = Object.entries(input.denominations).reduce((total, [note, count]) => total + Number(note) * 100 * count, 0);
+  if (denominationTotal !== input.cashPaise) {
+    throw new AppError(400, ErrorCode.VALIDATION_ERROR, 'The note count does not add up to the counted cash', {
+      fields: { denominations: `Notes add up to Rs. ${(denominationTotal / 100).toFixed(2)}, counted cash is Rs. ${(input.cashPaise / 100).toFixed(2)}` },
+      details: { denominationTotalPaise: denominationTotal, cashPaise: input.cashPaise },
+    });
   }
 
   const expected = await calculateExpected(ctx.businessId, branchId, businessDate);
@@ -491,7 +547,8 @@ export async function submitDayClosure(
     throw new AppError(
       400,
       ErrorCode.BAD_REQUEST,
-      'A reason is mandatory when there is a cash, UPI, or card discrepancy'
+      'A reason is mandatory when there is a cash, UPI, or card discrepancy',
+      { fields: { diffReason: 'Explain the difference' } }
     );
   }
 
@@ -560,8 +617,8 @@ export async function approveDayClosure(
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Day closure not found');
   }
 
-  if (closure.status === 'approved') {
-    return closure;
+  if (closure.status !== 'submitted') {
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, closure.status === 'approved' ? 'This day is already approved' : 'Submit the day-end count before approving it');
   }
 
   closure.status = 'approved';
@@ -629,7 +686,9 @@ export async function reopenDayClosure(
   if (!closure) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Day closure not found');
   }
-
+  if (closure.status !== 'approved') {
+    throw new AppError(422, ErrorCode.INVALID_TRANSITION, 'Only an approved day can be reopened');
+  }
   closure.status = 'open';
   closure.reopenLog.push({
     by: toObjectId(ctx.userId),

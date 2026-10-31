@@ -120,7 +120,7 @@ export class DayendController {
   public static async reopenDayClosure(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const result = await reopenDayClosure(req.ctx, req.params.branchId, req.params.date, {
-        reason: req.body.reason || 'Reopened by owner',
+        reason: req.body.reason,
       });
       res.json(result);
     } catch (err) {

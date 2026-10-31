@@ -9,7 +9,8 @@ export function paiseToRupees(paise: number): number {
 }
 
 export function rupeesToPaise(rupees: number): number {
-  return Math.round(rupees * 100);
+  // Shift via the decimal string so 1.005 -> 100.5 (not 100.49999…) and rounds half-up to 101
+  return Math.round(Number(`${rupees}e2`));
 }
 
 /**
@@ -46,12 +47,18 @@ export function distributeProRata(totalAmount: number, weights: number[]): numbe
     return weights.map(() => 0);
   }
 
+  // The rounding remainder goes to the last element that has weight, never to a zero-weight one
+  let lastWeighted = weights.length - 1;
+  while (lastWeighted > 0 && weights[lastWeighted] === 0) lastWeighted--;
+
   let allocated = 0;
   const result: number[] = [];
 
   for (let i = 0; i < weights.length; i++) {
-    if (i === weights.length - 1) {
+    if (i === lastWeighted) {
       result.push(totalAmount - allocated);
+    } else if (weights[i] === 0) {
+      result.push(0);
     } else {
       const share = Math.round((totalAmount * weights[i]) / sumWeights);
       result.push(share);

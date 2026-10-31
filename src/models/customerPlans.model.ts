@@ -23,7 +23,7 @@ export interface ICustomerPlan extends Document {
   status: 'active' | 'frozen' | 'expired' | 'used_up' | 'transferred' | 'cancelled';
   frozenAt?: Date;
   log: {
-    action: 'extend' | 'freeze' | 'unfreeze' | 'transfer' | 'redeem' | 'reverse';
+    action: 'sold' | 'extend' | 'freeze' | 'unfreeze' | 'transfer' | 'redeem' | 'reverse' | 'cancel';
     at: Date;
     by: Types.ObjectId;
     detail?: Record<string, any>;
@@ -62,7 +62,7 @@ const customerPlanSchema = new Schema<ICustomerPlan>(
       {
         action: {
           type: String,
-          enum: ['extend', 'freeze', 'unfreeze', 'transfer', 'redeem', 'reverse'],
+          enum: ['sold', 'extend', 'freeze', 'unfreeze', 'transfer', 'redeem', 'reverse', 'cancel'],
           required: true,
         },
         at: { type: Date, default: Date.now, required: true },
@@ -81,6 +81,11 @@ customerPlanSchema.plugin(tenantScopePlugin);
 
 customerPlanSchema.index({ businessId: 1, customerId: 1, status: 1 });
 customerPlanSchema.index({ businessId: 1, validTill: 1, status: 1 });
-customerPlanSchema.index({ businessId: 1, voucherCode: 1 }, { unique: true, sparse: true });
+// Unique voucher codes per business. Partial, not sparse: a compound sparse index still indexes
+// every plan (businessId is always set) with voucherCode null, allowing only one non-voucher plan.
+customerPlanSchema.index(
+  { businessId: 1, voucherCode: 1 },
+  { unique: true, partialFilterExpression: { voucherCode: { $type: 'string' } }, name: 'businessId_1_voucherCode_1_partial' }
+);
 
 export const CustomerPlan = model<ICustomerPlan>('customerPlans', customerPlanSchema);

@@ -1,33 +1,14 @@
 import { logger } from '../../utils';
 import { s3Adapter } from '../s3/s3.adapter';
+import { renderInvoicePdf } from './invoice.pdf';
 
 export class PdfService {
   /**
-   * Generates Bill/Invoice PDF.
-   * Format: 'a4' | 'thermal'
+   * Generates the Bill/Invoice PDF ('a4' or 80 mm 'thermal').
    */
   async generateInvoicePdf(bill: any, business?: any, branch?: any, format: 'a4' | 'thermal' = 'a4'): Promise<Buffer> {
     logger.debug({ invoiceNo: bill.invoiceNo, format }, 'Generating invoice PDF');
-    const title = bill.gstApplied ? 'TAX INVOICE' : 'BILL OF SUPPLY';
-    const lines = [
-      `============================================================`,
-      `                      ${business?.name || 'Glox Salon'}                      `,
-      `                   ${branch?.name || 'Main'} Branch                    `,
-      `============================================================`,
-      `                        ${title}                            `,
-      `Invoice No: ${bill.invoiceNo}    Date: ${bill.businessDate}`,
-      `Customer: ${bill.customerSnap?.name || 'Walk-in'}  (${bill.customerSnap?.phone || ''})`,
-      `Billed By: ${bill.billedByName || 'Reception'}`,
-      `------------------------------------------------------------`,
-      `TOTAL AMOUNT:      INR ${((bill.totals?.totalPaise || bill.totals?.finalPaise || 0) / 100).toFixed(2)}`,
-      `============================================================`,
-      `                  Thank you for your visit!                 `,
-      `============================================================`,
-    ]
-      .filter(Boolean)
-      .join('\n');
-
-    return Buffer.from(lines, 'utf-8');
+    return renderInvoicePdf(bill, business, branch, format);
   }
 
   /**

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { objectIdSchema } from './common.schema';
+import { objectIdSchema, isoDateSchema } from './common.schema';
 
 export const billLineInputSchema = z.object({
   kind: z.enum(['service', 'product', 'membership', 'package', 'wallet_topup', 'voucher']),
@@ -58,10 +58,34 @@ export const createBillSchema = z.object({
   collectDues: z.array(collectDueInputSchema).optional(),
 });
 
-export const editBillSchema = createBillSchema.extend({
-  reason: z.string().min(1, 'Edit reason is mandatory'),
+// Edit: lines are re-sent in full; payments/tips/billDiscount left out keep their current values
+export const editBillSchema = z.object({
+  lines: z.array(billLineInputSchema).min(1, 'At least one line is required'),
+  billDiscount: billDiscountInputSchema.nullable().optional(),
+  redemptions: z.array(redemptionInputSchema).optional(),
+  tips: z.array(tipInputSchema).optional(),
+  payments: z.array(paymentInputSchema).optional(),
+  reason: z.string().trim().min(1, 'Edit reason is mandatory'),
   __v: z.number().int(),
 });
+
+export const decideBillSchema = z.object({
+  decision: z.enum(['approve', 'reject']),
+  reason: z.string().trim().optional(),
+}).refine((d) => d.decision === 'approve' || !!d.reason, { path: ['reason'], message: 'A reason is required to reject' });
+
+export const listBillsQuerySchema = z.object({
+  from: isoDateSchema.optional(),
+  to: isoDateSchema.optional(),
+  status: z.enum(['awaiting_approval', 'rejected', 'paid', 'partly_paid', 'cancelled', 'refunded', 'partly_refunded']).optional(),
+  customerId: objectIdSchema.optional(),
+  billedBy: z.string().optional(),
+  q: z.string().trim().max(40).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+});
+
+export const approvalsQuerySchema = z.object({ branchId: objectIdSchema.optional() });
 
 export const cancelBillSchema = z.object({
   reason: z.string().min(1, 'Cancellation reason is mandatory'),
@@ -81,5 +105,10 @@ export const createDueReceiptSchema = z.object({
   customerId: objectIdSchema,
   payments: z.array(paymentInputSchema).min(1, 'At least one payment is required'),
 });
+
+// Preview can price a cart before a customer is chosen (redemptions then need a customer)
+export const previewBillSchema = createBillSchema.extend({ customerId: objectIdSchema.optional() });
 export const collectDueReceiptSchema = createDueReceiptSchema;
 
+
+export const invoicePdfQuerySchema = z.object({ format: z.enum(['a4', 'thermal']).optional() });

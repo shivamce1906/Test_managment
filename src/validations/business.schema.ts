@@ -43,12 +43,13 @@ export const createBusinessSchema = z.object({
   }),
 });
 
+// Every field optional and nested objects are merged server-side, so send only what changed.
 export const updateBusinessSettingsSchema = z.object({
   name: z.string().min(1).optional(),
   logoUrl: z.string().optional(),
   address: addressSchema.optional(),
   gst: z.object({
-    enabled: z.boolean(),
+    enabled: z.boolean().optional(),
     gstin: z.string().optional(),
     pan: z.string().optional(),
     rateBps: z.number().int().nonnegative().optional(),
@@ -63,25 +64,25 @@ export const updateBusinessSettingsSchema = z.object({
   }).optional(),
   dayEndReportTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
   loyalty: z.object({
-    enabled: z.boolean(),
-    earnPer100: z.number().nonnegative(),
-    redeemValuePaise: z.number().int().nonnegative(),
-    minRedeem: z.number().int().nonnegative(),
-    expiryDays: z.number().int().positive(),
+    enabled: z.boolean().optional(),
+    earnPer100: z.number().nonnegative().optional(),
+    redeemValuePaise: z.number().int().nonnegative().optional(),
+    minRedeem: z.number().int().nonnegative().optional(),
+    expiryDays: z.number().int().positive().optional(),
   }).optional(),
   payroll: z.object({
     pf: z.object({
-      enabled: z.boolean(),
+      enabled: z.boolean().optional(),
       employeePct: z.number().nonnegative().optional(),
       wageCeilingPaise: z.number().int().nonnegative().optional(),
     }).optional(),
     esi: z.object({
-      enabled: z.boolean(),
+      enabled: z.boolean().optional(),
       employeePct: z.number().nonnegative().optional(),
       wageCeilingPaise: z.number().int().nonnegative().optional(),
     }).optional(),
     pt: z.object({
-      enabled: z.boolean(),
+      enabled: z.boolean().optional(),
       slabs: z.array(z.object({
         uptoPaise: z.number().int().positive(),
         amountPaise: z.number().int().nonnegative(),
@@ -89,11 +90,11 @@ export const updateBusinessSettingsSchema = z.object({
     }).optional(),
   }).optional(),
   automationGuards: z.object({
-    quietStart: z.string().optional(),
-    quietEnd: z.string().optional(),
+    quietStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:mm').optional(),
+    quietEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:mm').optional(),
     maxMarketingPerDay: z.number().int().nonnegative().optional(),
   }).optional(),
-  ownerWhatsappPhone: z.string().optional(),
+  ownerWhatsappPhone: z.string().min(10).optional(),
 });
 
 export const createBranchSchema = z.object({

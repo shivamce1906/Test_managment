@@ -10,6 +10,7 @@ import {
   receivePurchaseOrder,
   recordVendorBill,
   getPurchaseOrders,
+  getPurchaseOrderById,
   createTransfer,
   approveTransfer,
   dispatchTransfer,
@@ -84,8 +85,7 @@ export class InventoryController {
 
   public getStock = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const pool = req.query.pool as any;
-      const result = await getStockBalances(req.ctx, req.params.branchId, pool);
+      const result = await getStockBalances(req.ctx, req.params.branchId, req.query as any);
       res.json(result);
     } catch (err) {
       next(err);
@@ -135,9 +135,17 @@ export class InventoryController {
       if (decision === 'approve') {
         result = await approvePurchaseOrder(req.ctx, req.params.id);
       } else {
-        result = await rejectPurchaseOrder(req.ctx, req.params.id, reason || 'Rejected');
+        result = await rejectPurchaseOrder(req.ctx, req.params.id, reason);
       }
       res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  public getPurchaseOrderById = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      res.json(await getPurchaseOrderById(req.ctx, req.params.id));
     } catch (err) {
       next(err);
     }
@@ -208,7 +216,7 @@ export class InventoryController {
 
   public createStockAudit = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const result = await createStockAudit(req.ctx, req.params.branchId, req.body.pool);
+      const result = await createStockAudit(req.ctx, req.params.branchId, req.body);
       res.status(201).json(result);
     } catch (err) {
       next(err);
@@ -226,7 +234,7 @@ export class InventoryController {
 
   public updateStockAuditCounts = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const result = await updateStockAuditCounts(req.ctx, req.params.id, req.body.counts);
+      const result = await updateStockAuditCounts(req.ctx, req.params.id, req.body);
       res.json(result);
     } catch (err) {
       next(err);

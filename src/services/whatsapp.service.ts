@@ -104,7 +104,7 @@ export async function configureWaNumber(
         businessId: businessId.toString(),
         numberId: waNum._id.toString(),
       });
-    } catch {}
+    } catch { }
   }
 
   // Automatically fetch & sync templates
@@ -385,7 +385,7 @@ export async function markChatRead(
 
   // Emit to Instant Broadcast socket engine if providerChatId exists
   if (conv.providerChatId) {
-    const waNum = await WaNumber.findById(conv.numberId);
+    const waNum = await WaNumber.findOne({ _id: conv.numberId, businessId: ctx.businessId });
     const uid = waNum?.instantBroadcast?.uid || waNum?.aisensy?.projectId;
     if (uid) {
       instantBroadcastSocket.markChatRead(uid, conv.providerChatId);
@@ -424,7 +424,7 @@ export async function saveChatNote(
   }
 
   if (conv.providerChatId) {
-    const waNum = await WaNumber.findById(conv.numberId);
+    const waNum = await WaNumber.findOne({ _id: conv.numberId, businessId: ctx.businessId });
     const uid = waNum?.instantBroadcast?.uid || waNum?.aisensy?.projectId;
     if (uid) {
       instantBroadcastSocket.saveChatNote(uid, conv.providerChatId, note);
@@ -705,12 +705,11 @@ export async function createCampaign(
     templateId: input.templateId,
     audience: {
       ...input.audience,
-      totalCount: totalAudience,
     },
     variableMap: input.variableMap,
     status: input.scheduledAt ? 'scheduled' : 'draft',
     scheduledAt: input.scheduledAt ? new Date(input.scheduledAt) : undefined,
-    stats: { sent: 0, delivered: 0, read: 0, failed: 0, excluded, costPaise: 0 },
+    stats: { total: totalAudience, sent: 0, delivered: 0, read: 0, failed: 0, excluded, costPaise: 0 },
     createdBy: ctx.userId,
     updatedBy: ctx.userId,
   });

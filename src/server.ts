@@ -29,6 +29,14 @@ async function bootstrap() {
     const server = app.listen(PORT, async () => {
       logger.info({ port: PORT }, `Glox Salon API server running on port ${PORT}`);
 
+      // Initialize real-time WebSocket gateway for frontend management dashboard
+      try {
+        const { initSocketServer } = await import('./socket');
+        initSocketServer(server);
+      } catch (socketErr) {
+        logger.warn({ err: socketErr }, 'Notice: WebSocket server failed to initialize');
+      }
+
       // Auto-start background workers (Point 4: Process PDF, WhatsApp & Day-End queues automatically)
       if (process.env.RUN_STANDALONE_WORKER !== 'true') {
         try {

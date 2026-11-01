@@ -1,5 +1,5 @@
 import { Worker, Job } from 'bullmq';
-import { getBullConnection, sendAiSensyMessage, fetchAiSensyTemplates } from '../../integrations';
+import { getBullConnection, sendInstantBroadcastMessage, fetchInstantBroadcastTemplates } from '../../integrations';
 import {
   WaMessage,
   WaNumber,
@@ -52,7 +52,9 @@ export function createWhatsAppWorker(): Worker {
         return;
       }
 
-      const apiKey = decrypt(numberDoc.aisensy.apiKeyEnc);
+      const tokenEnc = numberDoc.instantBroadcast?.userTokenEnc || numberDoc.aisensy?.apiKeyEnc;
+      const apiKey = tokenEnc ? decrypt(tokenEnc) : '';
+      const uid = numberDoc.instantBroadcast?.uid || numberDoc.aisensy?.projectId;
 
       try {
         let templateName: string | undefined;
@@ -61,8 +63,10 @@ export function createWhatsAppWorker(): Worker {
           if (tpl) templateName = tpl.name;
         }
 
-        const response = await sendAiSensyMessage({
+        const response = await sendInstantBroadcastMessage({
           apiKey,
+          userToken: apiKey,
+          uid,
           phone: conversation.phone,
           kind: message.kind,
           text: message.text,
@@ -72,13 +76,13 @@ export function createWhatsAppWorker(): Worker {
         });
 
         message.status = 'sent';
-        message.providerMessageId = response.providerMessageId || `aisensy_${Date.now()}`;
+        message.providerMessageId = response.providerMessageId || `ib_${Date.now()}`;
         message.costPaise = response.costPaise || 80;
         await message.save();
 
-        logger.info({ messageId, providerMessageId: message.providerMessageId }, 'WhatsApp message sent successfully');
+        logger.info({ messageId, providerMessageId: message.providerMessageId }, 'WhatsApp message sent successfully via Instant Broadcast');
       } catch (err: any) {
-        logger.error({ err, messageId }, 'Failed to send WhatsApp message via AiSensy');
+        logger.error({ err, messageId }, 'Failed to send WhatsApp message via Instant Broadcast');
         message.status = 'failed';
         message.error = err.message || 'Send error';
         await message.save();
@@ -196,8 +200,10 @@ export function createTemplateSyncWorker(): Worker {
       const numberDoc = await WaNumber.findOne({ _id: nId, businessId: bId });
       if (!numberDoc) return;
 
-      const apiKey = decrypt(numberDoc.aisensy.apiKeyEnc);
-      const templates = await fetchAiSensyTemplates(apiKey);
+      const tokenEnc = numberDoc.instantBroadcast?.userTokenEnc || numberDoc.aisensy?.apiKeyEnc;
+      const apiKey = tokenEnc ? decrypt(tokenEnc) : '';
+      const uid = numberDoc.instantBroadcast?.uid || numberDoc.aisensy?.projectId;
+      const templates = await fetchInstantBroadcastTemplates(apiKey, uid);
 
       for (const tpl of templates) {
         await WaTemplate.findOneAndUpdate(

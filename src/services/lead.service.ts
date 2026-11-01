@@ -14,6 +14,10 @@ export async function createLead(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
+  if (ctx.role === 'branch' && ctx.branchId && String(ctx.branchId) !== String(input.branchId)) {
+    throw new AppError(403, ErrorCode.FORBIDDEN, 'Branch login cannot add a lead to another branch');
+  }
+
   const phone = normalizePhone(input.phone);
 
   const lead = await Lead.create({
@@ -58,6 +62,14 @@ export async function updateLead(
   const lead = await Lead.findOne({ _id: toObjectId(leadId), businessId: toObjectId(ctx.businessId) });
   if (!lead) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Lead not found');
+  }
+
+  if (lead.stage === 'lost') {
+    throw new AppError(409, ErrorCode.INVALID_TRANSITION, 'A lost lead cannot be converted');
+  }
+
+  if (input.stage === 'lost' && !input.lostReason && !lead.lostReason) {
+    throw new AppError(400, ErrorCode.BAD_REQUEST, 'Marking a lead Lost requires a reason');
   }
 
   const before = lead.toObject();
@@ -105,12 +117,23 @@ export async function getLeads(
   }
 
   const query: any = { businessId: toObjectId(ctx.businessId) };
-  if (filter?.branchId) query.branchId = toObjectId(filter.branchId);
+  const effectiveBranchId = filter?.branchId || (ctx.role === 'branch' ? ctx.branchId : undefined);
+  if (effectiveBranchId) query.branchId = toObjectId(effectiveBranchId);
   if (filter?.stage) query.stage = filter.stage;
   if (filter?.assignedTo) query.assignedTo = toObjectId(filter.assignedTo);
   if (filter?.followUpDate) query.followUpDate = filter.followUpDate;
 
-  return Lead.find(query).populate('serviceIds', 'name').sort({ createdAt: -1 });
+  const leads = await Lead.find(query).populate('serviceIds', 'name').sort({ createdAt: -1 });
+  if (ctx.role === 'branch') {
+    return leads.map((l) => {
+      const obj = l.toObject();
+      if (obj.phone && obj.phone.length > 5) {
+        obj.phone = obj.phone.slice(0, 3) + '*****' + obj.phone.slice(-2);
+      }
+      return obj;
+    });
+  }
+  return leads;
 }
 
 export async function getLeadById(
@@ -142,6 +165,10 @@ export async function convertLead(
   const lead = await Lead.findOne({ _id: toObjectId(leadId), businessId: toObjectId(ctx.businessId) });
   if (!lead) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Lead not found');
+  }
+
+  if (lead.stage === 'lost') {
+    throw new AppError(409, ErrorCode.INVALID_TRANSITION, 'A lost lead cannot be converted');
   }
 
   if (lead.customerId) {

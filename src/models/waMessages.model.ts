@@ -12,6 +12,8 @@ export interface IWaMessage extends Document {
   templateId?: Types.ObjectId;
   variables?: string[];
   mediaKey?: string;
+  mediaUrl?: string;
+  senderName?: string;
   status: 'queued' | 'sent' | 'delivered' | 'read' | 'failed';
   error?: string;
   costPaise?: number;
@@ -33,6 +35,8 @@ const waMessageSchema = new Schema<IWaMessage>(
     templateId: { type: Schema.Types.ObjectId, ref: 'waTemplates' },
     variables: [{ type: String }],
     mediaKey: { type: String },
+    mediaUrl: { type: String },
+    senderName: { type: String },
     status: {
       type: String,
       enum: ['queued', 'sent', 'delivered', 'read', 'failed'],

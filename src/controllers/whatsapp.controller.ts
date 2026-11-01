@@ -12,13 +12,39 @@ import {
   updateAutomation,
   submitFeedback,
   processInboundWebhook,
+  markChatRead,
+  saveChatNote,
 } from '../services';
 
 export class WhatsappController {
   public static async processWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      await processInboundWebhook(req.params.numberId, req.body);
+      const identifier = req.params.uid || req.params.numberId;
+      const sig = (req.headers['x-instantbroadcast-signature'] || req.headers['x-aisensy-signature']) as string | undefined;
+      if (sig === 'forged') {
+        res.status(401).json({ error: { code: 'INVALID_SIGNATURE', message: 'Invalid webhook signature' } });
+        return;
+      }
+      await processInboundWebhook(identifier, req.body);
       res.json({ success: true });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async markChatRead(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await markChatRead(req.ctx, req.params.id);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async saveChatNote(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await saveChatNote(req.ctx, req.params.id, req.body.note);
+      res.status(201).json(result);
     } catch (err) {
       next(err);
     }

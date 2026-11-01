@@ -5,6 +5,7 @@ import {
   ledgerCheckQueue,
   recurringExpenseQueue,
   stockAlertsQueue,
+  dayEndReportQueue,
 } from './queues';
 import { logger } from '../utils';
 import { Business } from '../models';
@@ -68,6 +69,16 @@ export async function setupSchedulers(): Promise<void> {
     { pattern: '0 23 * * *' },
     {
       name: 'check',
+      data: { date: new Date().toISOString().split('T')[0] },
+    }
+  );
+
+  // Day-End report at 23:00 (11:00 PM) daily
+  await dayEndReportQueue().upsertJobScheduler(
+    'day-end-report-scheduler',
+    { pattern: '0 23 * * *' },
+    {
+      name: 'report',
       data: { date: new Date().toISOString().split('T')[0] },
     }
   );

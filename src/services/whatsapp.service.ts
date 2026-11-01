@@ -14,6 +14,8 @@ import {
   Notification,
   Lead,
   User,
+  Appointment,
+  AutomationSend,
   withTransaction,
 } from '../models';
 import { AppError, ErrorCode, normalizePhone, encrypt, decrypt } from '../utils';
@@ -26,6 +28,7 @@ import {
   getRedisClient,
 } from '../integrations';
 import { emitToBusiness } from '../socket';
+import { whatsappSendQueue } from '../workers/queues';
 import { z } from 'zod';
 import {
   configureWaNumberSchema,
@@ -606,43 +609,76 @@ export async function processInboundWebhook(
       const trimmed = payload.text.trim();
       const ratingNum = parseInt(trimmed, 10);
       if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5 && conv.customerId) {
+        const recentAppt = await Appointment.findOne({
+          businessId: waNum.businessId,
+          customerId: conv.customerId,
+          status: { $in: ['completed', 'billed'] },
+        }).sort({ updatedAt: -1 });
+
         const recentBill = await Bill.findOne({
           businessId: waNum.businessId,
           customerId: conv.customerId,
           status: { $in: ['paid', 'partly_paid'] },
         }).sort({ createdAt: -1 });
 
-        if (recentBill) {
-          const existingFeedback = await Feedback.findOne({
+        const billId = recentBill?._id || recentAppt?.billId;
+        const branchId = recentAppt?.branchId || recentBill?.branchId;
+        const staffIds = recentBill
+          ? (recentBill.lines || []).flatMap((it: any) => (it.staff || []).map((s: any) => s.staffId)).filter(Boolean)
+          : (recentAppt?.lines || []).map((l: any) => l.staffId).filter(Boolean);
+
+        const existingFeedback = await Feedback.findOne({
+          businessId: waNum.businessId,
+          $or: [
+            ...(billId ? [{ billId }] : []),
+            ...(recentAppt ? [{ appointmentId: recentAppt._id }] : []),
+          ],
+        });
+
+        if (!existingFeedback && (billId || recentAppt)) {
+          const isHighRating = ratingNum >= 4;
+          const feedback = await Feedback.create({
             businessId: waNum.businessId,
-            billId: recentBill._id,
+            branchId,
+            billId,
+            appointmentId: recentAppt?._id,
+            customerId: conv.customerId,
+            staffIds,
+            rating: ratingNum as any,
+            comment: payload.text,
+            reviewLinkSent: isHighRating,
           });
 
-          if (!existingFeedback) {
-            const isHighRating = ratingNum >= 4;
-            const staffIds = (recentBill.lines || []).flatMap((it: any) => (it.staff || []).map((s: any) => s.staffId)).filter(Boolean) as Types.ObjectId[];
-            const feedback = await Feedback.create({
-              businessId: waNum.businessId,
-              branchId: recentBill.branchId,
-              billId: recentBill._id,
-              customerId: conv.customerId,
-              staffIds,
-              rating: ratingNum as any,
-              comment: payload.text,
-              reviewLinkSent: isHighRating,
-            });
+          if (ratingNum <= 3) {
+            const owner = await User.findOne({ businessId: waNum.businessId, role: 'owner' });
+            if (owner) {
+              await Notification.create({
+                businessId: waNum.businessId,
+                userId: owner._id,
+                type: 'low_feedback',
+                title: 'Low Rating Received',
+                body: `Customer left a rating of ${ratingNum}/5`,
+              });
+            }
+          } else if (isHighRating && branchId) {
+            const branch = await Branch.findOne({ _id: branchId, businessId: waNum.businessId });
+            if (branch?.googleReviewUrl) {
+              const reviewMsg = await WaMessage.create({
+                businessId: waNum.businessId,
+                conversationId: conv._id,
+                direction: 'out',
+                kind: 'text',
+                text: `Thank you so much for your kind rating! ⭐ If you have a moment, we would love it if you could share your review on Google: ${branch.googleReviewUrl}`,
+                origin: 'automation',
+                originId: feedback._id,
+                status: 'queued',
+              });
 
-            if (ratingNum <= 3) {
-              const owner = await User.findOne({ businessId: waNum.businessId, role: 'owner' });
-              if (owner) {
-                await Notification.create({
-                  businessId: waNum.businessId,
-                  userId: owner._id,
-                  type: 'low_feedback',
-                  title: 'Low Rating Received',
-                  body: `Customer left a rating of ${ratingNum}/5`,
-                });
-              }
+              await whatsappSendQueue().add(
+                'send',
+                { messageId: reviewMsg._id.toString() },
+                { jobId: reviewMsg._id.toString() }
+              );
             }
           }
         }
@@ -847,4 +883,81 @@ export async function submitFeedback(
   });
 
   return feedback;
+}
+
+/**
+ * Sends a Thank You & 1-5 feedback WhatsApp prompt immediately after an appointment is completed.
+ */
+export async function sendAppointmentFeedbackMessage(
+  appointmentId: string | Types.ObjectId
+): Promise<void> {
+  const appt = await Appointment.findById(appointmentId).setOptions({ skipTenantScope: true });
+  if (!appt || appt.status !== 'completed') return;
+
+  const customer = await Customer.findOne({ _id: appt.customerId, businessId: appt.businessId });
+  if (!customer || !customer.phone || customer.doNotMessage || customer.waOptIn === false) return;
+
+  const dedupeId = `feedback:appointment:${appt._id}`;
+  const existing = await AutomationSend.findById(dedupeId);
+  if (existing) return;
+
+  const waNumber = await WaNumber.findOne({ businessId: appt.businessId, status: 'active' });
+  if (!waNumber) return;
+
+  const branch = await Branch.findOne({ _id: appt.branchId, businessId: appt.businessId });
+  const business = await Business.findById(appt.businessId);
+  const salonName = branch?.name || business?.name || 'our salon';
+
+  let conversation = await WaConversation.findOne({
+    businessId: appt.businessId,
+    numberId: waNumber._id,
+    phone: customer.phone,
+  });
+
+  if (!conversation) {
+    conversation = await WaConversation.create({
+      businessId: appt.businessId,
+      numberId: waNumber._id,
+      branchId: appt.branchId,
+      phone: customer.phone,
+      customerId: customer._id,
+      lastMessageAt: new Date(),
+      unread: 0,
+    });
+  }
+
+  // Look for post_service_feedback template if approved
+  const tpl = await WaTemplate.findOne({
+    businessId: appt.businessId,
+    name: 'post_service_feedback',
+    status: 'approved',
+  });
+
+  const feedbackText = `Hi ${customer.name}, thank you for visiting ${salonName} today! ✨ We hope you loved your service. How would you rate your experience with us? Please reply with a number from 1 to 5 (1 = Poor, 5 = Excellent).`;
+
+  const msg = await WaMessage.create({
+    businessId: appt.businessId,
+    conversationId: conversation._id,
+    direction: 'out',
+    kind: tpl ? 'template' : 'text',
+    templateId: tpl?._id,
+    variables: tpl ? [customer.name, salonName] : undefined,
+    text: feedbackText,
+    origin: 'automation',
+    originId: appt._id,
+    status: 'queued',
+  });
+
+  await AutomationSend.create({
+    _id: dedupeId,
+    businessId: appt.businessId,
+    messageId: msg._id,
+    at: new Date(),
+  });
+
+  await whatsappSendQueue().add(
+    'send',
+    { messageId: msg._id.toString() },
+    { jobId: msg._id.toString() }
+  );
 }

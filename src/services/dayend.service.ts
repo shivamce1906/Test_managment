@@ -9,9 +9,10 @@ import {
   Branch,
   withTransaction,
 } from '../models';
-import { AppError, ErrorCode, getBusinessDate } from '../utils';
+import { AppError, ErrorCode, getBusinessDate, logger } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
+import { dayEndReportQueue } from '../workers/queues';
 
 /** Managers and branch logins only touch their own branches' expenses. */
 function assertBranchScope(ctx: RequestContext, branchId: Types.ObjectId): void {
@@ -659,6 +660,19 @@ export async function approveDayClosure(
     targetType: 'dayClosure',
     targetId: closure._id,
     meta: { businessDate, pdfKey },
+  });
+
+  // Queue Day End report on WhatsApp to salon owner
+  dayEndReportQueue().add(
+    'report',
+    {
+      businessId: ctx.businessId,
+      branchId: branchId.toString(),
+      date: businessDate,
+    },
+    { jobId: `dayend_approved_${branchId}_${businessDate}` }
+  ).catch((err) => {
+    logger.warn({ err, branchId, businessDate }, 'Failed to queue day-end report on day closure approval');
   });
 
   return closure;

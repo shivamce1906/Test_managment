@@ -687,6 +687,16 @@ export class BusinessService {
   }
 
   /**
+   * Names of every active branch in the business, for pickers that cross branches (e.g. "request stock from").
+   * Open to every salon role; carries no settings, contacts or numbers.
+   */
+  async getBranchDirectory(ctx: RequestContext) {
+    return Branch.find({ businessId: toObjectId(ctx.businessId!), status: 'active' })
+      .select('_id name code status')
+      .sort({ createdAt: 1 });
+  }
+
+  /**
    * Updates branch working hours, holidays, stations, googleReviewUrl, pettyCashFloatPaise.
    */
   async updateBranch(ctx: RequestContext, branchIdStr: string, updates: any): Promise<IBranch> {

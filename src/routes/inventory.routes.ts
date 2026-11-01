@@ -43,25 +43,25 @@ inventoryRouter.patch('/vendors/:id', requireRole('owner', 'manager'), validate(
 // 3. Branch Stock & Movements
 inventoryRouter.get('/branches/:branchId/stock', requireBranchAccess, validate({ query: stockQuerySchema }), inventoryController.getStock);
 inventoryRouter.get('/branches/:branchId/stock/movements', requireBranchAccess, validate({ query: stockMovementsQuerySchema }), inventoryController.getStockMovements);
-inventoryRouter.post('/branches/:branchId/stock/adjust', requireBranchAccess, requireRole('owner', 'manager'), validate({ body: adjustStockSchema }), inventoryController.adjustStock);
+inventoryRouter.post('/branches/:branchId/stock/adjust', requireBranchAccess, requireRole('owner', 'manager', 'branch'), validate({ body: adjustStockSchema }), inventoryController.adjustStock);
 
 // 4. Purchase Orders
-inventoryRouter.post('/purchase-orders', requireRole('owner', 'manager'), validate({ body: createPurchaseOrderSchema }), inventoryController.createPurchaseOrder);
-inventoryRouter.get('/purchase-orders', requireRole('owner', 'manager'), validate({ query: listPurchaseOrdersQuerySchema }), inventoryController.getPurchaseOrders);
-inventoryRouter.get('/purchase-orders/:id', requireRole('owner', 'manager'), validate({ params: idParamSchema }), inventoryController.getPurchaseOrderById);
+inventoryRouter.post('/purchase-orders', requireRole('owner', 'manager', 'branch'), validate({ body: createPurchaseOrderSchema }), inventoryController.createPurchaseOrder);
+inventoryRouter.get('/purchase-orders', requireRole('owner', 'manager', 'branch'), validate({ query: listPurchaseOrdersQuerySchema }), inventoryController.getPurchaseOrders);
+inventoryRouter.get('/purchase-orders/:id', requireRole('owner', 'manager', 'branch'), validate({ params: idParamSchema }), inventoryController.getPurchaseOrderById);
 inventoryRouter.post('/purchase-orders/:id/decide', requireRole('owner', 'manager'), requirePermission('approvePO'), validate({ params: idParamSchema, body: decidePurchaseOrderSchema }), inventoryController.decidePurchaseOrder);
-inventoryRouter.post('/purchase-orders/:id/receive', requireRole('owner', 'manager'), validate({ params: idParamSchema, body: receivePurchaseOrderSchema }), inventoryController.receivePurchaseOrder);
+inventoryRouter.post('/purchase-orders/:id/receive', requireRole('owner', 'manager', 'branch'), validate({ params: idParamSchema, body: receivePurchaseOrderSchema }), inventoryController.receivePurchaseOrder);
 inventoryRouter.post('/purchase-orders/:id/bill', requireRole('owner', 'manager'), validate({ params: idParamSchema, body: recordVendorBillSchema }), inventoryController.recordVendorBill);
 
 // 5. Inter-Branch Transfers
-inventoryRouter.post('/transfers', requireRole('owner', 'manager'), validate({ body: createTransferSchema }), inventoryController.createTransfer);
-inventoryRouter.get('/transfers', requireRole('owner', 'manager'), validate({ query: listTransfersQuerySchema }), inventoryController.getTransfers);
+inventoryRouter.post('/transfers', requireRole('owner', 'manager', 'branch'), validate({ body: createTransferSchema }), inventoryController.createTransfer);
+inventoryRouter.get('/transfers', requireRole('owner', 'manager', 'branch'), validate({ query: listTransfersQuerySchema }), inventoryController.getTransfers);
 inventoryRouter.post('/transfers/:id/approve', requireRole('owner', 'manager'), validate({ params: idParamSchema }), inventoryController.approveTransfer);
 inventoryRouter.post('/transfers/:id/dispatch', requireRole('owner', 'manager'), validate({ params: idParamSchema }), inventoryController.dispatchTransfer);
-inventoryRouter.post('/transfers/:id/receive', requireRole('owner', 'manager'), validate({ params: idParamSchema, body: receiveTransferSchema }), inventoryController.receiveTransfer);
+inventoryRouter.post('/transfers/:id/receive', requireRole('owner', 'manager', 'branch'), validate({ params: idParamSchema, body: receiveTransferSchema }), inventoryController.receiveTransfer);
 
 // 6. Physical Stock Audits
-inventoryRouter.post('/branches/:branchId/stock-audits', requireBranchAccess, requireRole('owner', 'manager'), validate({ body: createStockAuditSchema }), inventoryController.createStockAudit);
+inventoryRouter.post('/branches/:branchId/stock-audits', requireBranchAccess, requireRole('owner', 'manager', 'branch'), validate({ body: createStockAuditSchema }), inventoryController.createStockAudit);
 inventoryRouter.get('/branches/:branchId/stock-audits', requireBranchAccess, inventoryController.getStockAudits);
-inventoryRouter.patch('/stock-audits/:id/counts', requireRole('owner', 'manager'), validate({ params: idParamSchema, body: updateStockAuditCountsSchema }), inventoryController.updateStockAuditCounts);
+inventoryRouter.patch('/stock-audits/:id/counts', requireRole('owner', 'manager', 'branch'), validate({ params: idParamSchema, body: updateStockAuditCountsSchema }), inventoryController.updateStockAuditCounts);
 inventoryRouter.post('/stock-audits/:id/approve', requireRole('owner', 'manager'), validate({ params: idParamSchema }), inventoryController.approveStockAudit);

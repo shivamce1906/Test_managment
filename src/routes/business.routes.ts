@@ -27,6 +27,7 @@ businessRouter.patch('/settings', requireRole('owner'), validate({ body: updateB
 
 // 2. Branches
 businessRouter.get('/branches', requireRole('owner', 'manager', 'branch'), BusinessController.getBranches);
+businessRouter.get('/branches/directory', requireRole('owner', 'manager', 'branch'), BusinessController.getBranchDirectory);
 // Managers need the editBranch flag and may edit only their own branches (checked in the service)
 businessRouter.patch('/branches/:branchId', requireRole('owner', 'manager'), requirePermission('editBranch'), validate({ params: z.object({ branchId: objectIdSchema }), body: updateBranchSchema }), BusinessController.updateBranch);
 businessRouter.post('/branch-requests', requireRole('owner'), validate({ body: createBranchRequestSchema }), BusinessController.createBranchRequest);

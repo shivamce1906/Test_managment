@@ -32,6 +32,7 @@ import {
   submitDayClosureSchema,
   reopenDayClosureSchema,
 } from '../validations';
+import { hasPermission } from '../middlewares/permission.middleware';
 
 // ----------------------------------------------------
 // Expenses
@@ -673,8 +674,8 @@ export async function reopenDayClosure(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  if (ctx.role !== 'owner' && ctx.role !== 'super_admin' && ctx.role !== 'superadmin') {
-    throw new AppError(403, ErrorCode.FORBIDDEN, 'Only business owner can reopen an approved day closure');
+  if (!hasPermission(ctx, 'manageFinance')) {
+    throw new AppError(403, ErrorCode.FORBIDDEN, 'Only the owner (or a manager with finance access) can reopen an approved day closure');
   }
 
   const closure = await DayClosure.findOne({

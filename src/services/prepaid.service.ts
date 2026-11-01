@@ -12,6 +12,7 @@ import {
   transferPlanSchema,
   adjustWalletSchema,
 } from '../validations';
+import { hasPermission } from '../middlewares/permission.middleware';
 
 export async function createPlan(
   ctx: RequestContext,
@@ -404,8 +405,8 @@ export async function adjustWallet(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  if (ctx.role !== 'owner' && ctx.role !== 'super_admin' && ctx.role !== 'superadmin') {
-    throw new AppError(403, ErrorCode.FORBIDDEN, 'Only business owner can adjust wallet balance');
+  if (!hasPermission(ctx, 'manageCustomers')) {
+    throw new AppError(403, ErrorCode.FORBIDDEN, 'Only the owner (or a manager with customer access) can adjust wallet balance');
   }
 
   const businessId = toObjectId(ctx.businessId);
@@ -505,7 +506,7 @@ export async function lookupVoucher(
   }
 
   const obj: any = voucher.toObject();
-  if (obj.customerId?.phone && (ctx.role === 'manager' || ctx.role === 'branch')) {
+  if (obj.customerId?.phone && ctx.role === 'branch') {
     obj.customerId.phone = maskPhone(obj.customerId.phone);
   }
   return obj;

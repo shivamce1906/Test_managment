@@ -55,7 +55,7 @@ function assertBranchScope(ctx: RequestContext, branchId: Types.ObjectId): void 
 
 function presentCustomer(ctx: RequestContext, apt: any): any {
   const obj: any = typeof apt.toObject === 'function' ? apt.toObject() : apt;
-  if (obj.customerId && typeof obj.customerId === 'object' && obj.customerId.phone && (ctx.role === 'manager' || ctx.role === 'branch')) {
+  if (obj.customerId && typeof obj.customerId === 'object' && obj.customerId.phone && ctx.role === 'branch') {
     obj.customerId = { ...obj.customerId, phone: maskPhone(obj.customerId.phone) };
   }
   return obj;

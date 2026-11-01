@@ -24,8 +24,8 @@ payrollRouter.get('/branches/:branchId/payroll-runs', requireBranchAccess, valid
 payrollRouter.get('/payroll-runs/:id', validate({ params: idParamSchema }), PayrollController.getPayrollRunById);
 payrollRouter.patch('/payroll-runs/:id/adjust-line', validate({ params: idParamSchema, body: adjustPayrollLineSchema }), PayrollController.adjustPayrollLine);
 payrollRouter.post('/payroll-runs/:id/review', validate({ params: idParamSchema }), PayrollController.reviewRun);
-payrollRouter.post('/payroll-runs/:id/lock', requireRole('owner'), validate({ params: idParamSchema }), PayrollController.lockRun);
-payrollRouter.post('/payroll-runs/:id/mark-paid', requireRole('owner'), validate({ params: idParamSchema, body: markPayrollPaidSchema }), PayrollController.markPaid);
+payrollRouter.post('/payroll-runs/:id/lock', requirePermission('managePayroll'), validate({ params: idParamSchema }), PayrollController.lockRun);
+payrollRouter.post('/payroll-runs/:id/mark-paid', requirePermission('managePayroll'), validate({ params: idParamSchema, body: markPayrollPaidSchema }), PayrollController.markPaid);
 
 // 3. Payslips
 payrollRouter.post('/payroll-runs/:id/payslips', validate({ params: idParamSchema }), PayrollController.generatePayslips);

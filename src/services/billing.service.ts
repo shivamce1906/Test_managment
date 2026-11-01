@@ -49,6 +49,13 @@ function assertBillScope(ctx: RequestContext, bill: { branchId: Types.ObjectId }
   }
 }
 
+/** A manager can't decide a bill they sent for approval themselves; the owner or another manager does. */
+function assertNotOwnRequest(ctx: RequestContext, bill: { approval?: { requestedBy?: Types.ObjectId } }): void {
+  if (ctx.role === 'manager' && bill.approval?.requestedBy?.toString() === ctx.userId) {
+    throw new AppError(403, 'FORBIDDEN', 'You cannot approve or reject a bill you sent for approval');
+  }
+}
+
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
 /** A locked or paid payroll month has paid out this bill's commission: the bill is frozen. */
@@ -619,7 +626,7 @@ export class BillingService {
       })),
       tips: prepared.tips,
       status,
-      approval: status === 'awaiting_approval' ? { reasons: approvalReasons, requestedAt: new Date() } : undefined,
+      approval: status === 'awaiting_approval' ? { reasons: approvalReasons, requestedAt: new Date(), requestedBy: toObjectId(ctx.userId) } : undefined,
       version: 1,
       refunds: [],
       idempotencyKey: key,
@@ -1015,6 +1022,7 @@ export class BillingService {
       if (bill.status !== 'awaiting_approval') {
         throw new AppError(422, 'INVALID_TRANSITION', 'Bill is not awaiting approval');
       }
+      assertNotOwnRequest(ctx, bill);
 
       const customer = await Customer.findOne({ _id: bill.customerId, businessId }).session(session);
       if (!customer) throw new AppError(404, 'NOT_FOUND', 'Customer not found');
@@ -1060,6 +1068,7 @@ export class BillingService {
     if (bill.status !== 'awaiting_approval') {
       throw new AppError(422, 'INVALID_TRANSITION', 'Bill is not awaiting approval');
     }
+    assertNotOwnRequest(ctx, bill);
 
     bill.status = 'rejected';
     if (bill.approval) {
@@ -1485,7 +1494,7 @@ export class BillingService {
         await bill.save({ session });
         await this.applyBillEffects(businessId, bill.branchId, bill, customer, undefined, session, toObjectId(ctx.userId));
       } else {
-        bill.approval = { reasons: prepared.approvalReasons, requestedAt: new Date() } as any;
+        bill.approval = { reasons: prepared.approvalReasons, requestedAt: new Date(), requestedBy: toObjectId(ctx.userId) } as any;
         await bill.save({ session });
       }
 

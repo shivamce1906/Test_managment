@@ -47,6 +47,15 @@ Re-run one area after a fix, e.g. `npx jest tests/integration/billing.core`.
 >
 > Full suite now: **680 tests · 618 passed · 62 failed**. All 62 are in reports/dashboard, payroll, leads/WhatsApp, workers and auth hardening (Phase 4 and later). See [OWNER_API_GUIDE.md §19](OWNER_API_GUIDE.md#19-backend-changes-for-phases-23-2026-10-29).
 >
+> **Progress — 2026-10-31 (Manager panel).** A sweep of 122 manager calls found and fixed:
+> - **Staff scope:** managers and branch logins could read and edit other branches' staff, rosters and leave.
+> - **Branch prices:** `PATCH /services/:id` let a manager change branch prices without `editBranchPrices`; catalogue writes are now owner-only at the route.
+> - **Approvals:** a manager could approve their own held bill.
+>
+> **New:** `editBranch` flag, `/auth/me` `config`, managers manage their branches' logins, managers see full customer numbers.
+>
+> Full suite now: **710 tests · 662 passed · 48 failed** (unchanged later-phase items). See [MANAGER_API_GUIDE.md §9](MANAGER_API_GUIDE.md#9-backend-changes-for-the-manager-panel-2026-10-31).
+>
 > **Progress — 2026-10-29 (Owner Phase 4: insights, payroll).** Fixed:
 > - **#8:** payroll create and mark-paid (the controller passed a bare string); statutory deductions, proration, stale check, partial mark-paid.
 > - **Reports and dashboard:** rebuilt from source records (date range honoured, branch scope, margins, P&L, GSTR-1).
@@ -603,3 +612,8 @@ Also: a **platform (Super Admin) token on tenant routes** hits this and returns 
 | # | Area | Test | Expected → Actual |
 | ---: | --- | --- | --- |
 | 214 | normalizePhone (+91XXXXXXXXXX) | EDGE: garbage input must not produce a stored "valid-looking" number | expected not /^\+\d{1,9}$/ / got "+12345" |
+
+
+## Progress — manager flags (2026-10-31)
+
+Six owner-granted manager flags added (`manageCatalogue`, `manageCustomers`, `manageFinance`, `managePayroll`, `exportAudit`, `manageMarketing`). Full suite: **716 tests · 670 passed · 46 failed**. The two fixed are the leads-whatsapp checks that managers can only view campaigns. The remaining failures are unchanged: leads-whatsapp, workers, reports-system, auth.

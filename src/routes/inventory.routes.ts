@@ -31,9 +31,9 @@ export const inventoryRouter = guardedRouter(authenticate(), requireKind('tenant
 
 
 // 1. Products Master
-inventoryRouter.post('/products', requireRole('owner', 'manager'), validate({ body: createProductSchema }), inventoryController.createProduct);
+inventoryRouter.post('/products', requireRole('owner', 'manager'), requirePermission('manageCatalogue'), validate({ body: createProductSchema }), inventoryController.createProduct);
 inventoryRouter.get('/products', validate({ query: listProductsQuerySchema }), inventoryController.getProducts);
-inventoryRouter.patch('/products/:id', requireRole('owner', 'manager'), validate({ params: idParamSchema, body: updateProductSchema }), inventoryController.updateProduct);
+inventoryRouter.patch('/products/:id', requireRole('owner', 'manager'), requirePermission('manageCatalogue'), validate({ params: idParamSchema, body: updateProductSchema }), inventoryController.updateProduct);
 
 // 2. Vendors Master
 inventoryRouter.post('/vendors', requireRole('owner', 'manager'), validate({ body: createVendorSchema }), inventoryController.createVendor);

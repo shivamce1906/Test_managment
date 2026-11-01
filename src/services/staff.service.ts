@@ -15,6 +15,20 @@ import {
   createAdvanceSchema,
 } from '../validations';
 
+/** Managers and branch logins only reach staff of their own branches; the owner reaches all. */
+function inBranchScope(ctx: RequestContext, branchId: Types.ObjectId | string) {
+  return ctx.role === 'owner' || ctx.branchIds.includes(branchId.toString());
+}
+
+/** Loads a staff member of the business; one outside the user's branches is reported as not found. */
+async function findScopedStaff(ctx: RequestContext, staffId: string | Types.ObjectId) {
+  const staff = await Staff.findOne({ _id: toObjectId(staffId), businessId: toObjectId(ctx.businessId!) });
+  if (!staff || !inBranchScope(ctx, staff.branchId)) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff member not found');
+  }
+  return staff;
+}
+
 export async function createStaff(
   ctx: RequestContext,
   input: z.infer<typeof createStaffSchema>
@@ -84,10 +98,7 @@ export async function updateStaff(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const staff = await Staff.findOne({ _id: toObjectId(staffId), businessId: toObjectId(ctx.businessId) });
-  if (!staff) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff member not found');
-  }
+  const staff = await findScopedStaff(ctx, staffId);
 
   const before = staff.toObject();
 
@@ -152,7 +163,14 @@ export async function getStaffList(
   }
 
   const query: any = { businessId: toObjectId(ctx.businessId) };
-  if (filter?.branchId) query.branchId = toObjectId(filter.branchId);
+  if (filter?.branchId) {
+    if (!inBranchScope(ctx, filter.branchId)) {
+      throw new AppError(403, ErrorCode.FORBIDDEN, 'You do not have access to this branch');
+    }
+    query.branchId = toObjectId(filter.branchId);
+  } else if (ctx.role !== 'owner') {
+    query.branchId = { $in: ctx.branchIds.map(toObjectId) };
+  }
   if (filter?.status) query.status = filter.status;
   if (filter?.designation) query.designation = filter.designation;
   if (filter?.q) {
@@ -171,11 +189,7 @@ export async function getStaffById(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const staff = await Staff.findOne({ _id: toObjectId(staffId), businessId: toObjectId(ctx.businessId) });
-  if (!staff) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff member not found');
-  }
-  return staff;
+  return findScopedStaff(ctx, staffId);
 }
 
 export async function getBilledByStaff(
@@ -208,12 +222,9 @@ export async function getRoster(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
+  const staff = await findScopedStaff(ctx, staffId);
   let roster = await Roster.findOne({ businessId: toObjectId(ctx.businessId), staffId: toObjectId(staffId) });
   if (!roster) {
-    const staff = await Staff.findOne({ _id: toObjectId(staffId), businessId: toObjectId(ctx.businessId) });
-    if (!staff) {
-      throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff member not found');
-    }
     const defaultWeekly = [
       { day: 0, start: '10:00', end: '20:00', off: false },
       { day: 1, start: '10:00', end: '20:00', off: false },
@@ -246,10 +257,7 @@ export async function updateRoster(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const staff = await Staff.findOne({ _id: toObjectId(staffId), businessId: toObjectId(ctx.businessId) });
-  if (!staff) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Staff member not found');
-  }
+  const staff = await findScopedStaff(ctx, staffId);
 
   let roster = await Roster.findOne({ businessId: toObjectId(ctx.businessId), staffId: toObjectId(staffId) });
   const before = roster ? roster.toObject() : null;
@@ -516,7 +524,7 @@ export async function updateLeaveStatus(
   }
 
   const leave = await Leave.findOne({ _id: toObjectId(leaveId), businessId: toObjectId(ctx.businessId) });
-  if (!leave) {
+  if (!leave || !inBranchScope(ctx, leave.branchId)) {
     throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Leave request not found');
   }
 

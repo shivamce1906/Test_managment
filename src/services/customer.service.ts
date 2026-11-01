@@ -19,11 +19,12 @@ import { AppError, maskPhone, maskEmail, normalizePhone, getBusinessDate } from 
 import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
 import ExcelJS from 'exceljs';
+import { hasPermission } from '../middlewares/permission.middleware';
 
 const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** Managers and branch logins see masked phone and email unless they explicitly reveal (audited). */
-const masksContact = (ctx: RequestContext) => ctx.role === 'manager' || ctx.role === 'branch';
+/** Branch logins see masked phone and email unless they explicitly reveal (audited); owners and managers see them in full. */
+const masksContact = (ctx: RequestContext) => ctx.role === 'branch';
 
 function present(ctx: RequestContext, customer: ICustomer | any): any {
   const obj: any = typeof customer.toObject === 'function' ? customer.toObject() : { ...customer };
@@ -188,9 +189,9 @@ export class CustomerService {
       throw new AppError(404, 'NOT_FOUND', 'Customer not found');
     }
 
-    const shouldMask = (ctx.role === 'manager' || ctx.role === 'branch') && !reveal;
+    const shouldMask = masksContact(ctx) && !reveal;
 
-    if (reveal && (ctx.role === 'manager' || ctx.role === 'branch')) {
+    if (reveal && masksContact(ctx)) {
       await auditService.logAction({
         ctx,
         action: 'customer.phone_reveal',
@@ -389,11 +390,11 @@ export class CustomerService {
   }
 
   /**
-   * Exports customer directory to Excel (Owner only).
+   * Exports customer directory to Excel (owner, or manager with manageCustomers).
    */
   async exportCustomers(ctx: RequestContext): Promise<Buffer> {
-    if (ctx.role !== 'owner') {
-      throw new AppError(403, 'FORBIDDEN', 'Only owner can export customer data');
+    if (!hasPermission(ctx, 'manageCustomers')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with customer access) can export customer data');
     }
 
     const businessId = toObjectId(ctx.businessId!);

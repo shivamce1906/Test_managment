@@ -1,12 +1,29 @@
 import { Request, Response, NextFunction } from 'express';
 import { AppError, ErrorCode } from '../utils';
+import { RequestContext } from '../services/context';
 
 export type UserPermissionFlag =
   | 'manageStaff'
   | 'approvePO'
   | 'viewPayroll'
   | 'editBranchPrices'
+  | 'editBranch'
+  | 'manageCatalogue'
+  | 'manageCustomers'
+  | 'manageFinance'
+  | 'managePayroll'
+  | 'exportAudit'
+  | 'manageMarketing'
   | 'markAttendance';
+
+/**
+ * Service-level check: owners (and platform admins) always pass; managers need the flag; branch logins never pass.
+ * Routes guard with requireRole + requirePermission; services repeat it so direct calls stay safe.
+ */
+export function hasPermission(ctx: RequestContext, flag: UserPermissionFlag): boolean {
+  if (ctx.role === 'owner' || ctx.role === 'super_admin' || ctx.role === 'superadmin') return true;
+  return ctx.role === 'manager' && Boolean(ctx.flags?.[flag]);
+}
 
 export function requirePermission(flag: UserPermissionFlag) {
   return (req: Request, res: Response, next: NextFunction) => {

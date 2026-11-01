@@ -16,6 +16,7 @@ import { AppError } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
 import { assertRefsInBusiness } from './tenant-refs';
+import { hasPermission } from '../middlewares/permission.middleware';
 
 const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -30,8 +31,8 @@ export class CatalogueService {
   // --- CATEGORIES ---
 
   async createCategory(ctx: RequestContext, data: any): Promise<ICategory> {
-    if (ctx.role !== 'owner') {
-      throw new AppError(403, 'FORBIDDEN', 'Only owner can create categories');
+    if (!hasPermission(ctx, 'manageCatalogue')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can create categories');
     }
 
     const businessId = toObjectId(ctx.businessId!);
@@ -68,8 +69,8 @@ export class CatalogueService {
   }
 
   async updateCategory(ctx: RequestContext, id: string, updates: any): Promise<ICategory> {
-    if (ctx.role !== 'owner') {
-      throw new AppError(403, 'FORBIDDEN', 'Only owner can update categories');
+    if (!hasPermission(ctx, 'manageCatalogue')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can update categories');
     }
 
     const businessId = toObjectId(ctx.businessId!);
@@ -116,8 +117,8 @@ export class CatalogueService {
   }
 
   async reorderCategories(ctx: RequestContext, orders: { id: string; order: number }[]): Promise<void> {
-    if (ctx.role !== 'owner') {
-      throw new AppError(403, 'FORBIDDEN', 'Only owner can reorder categories');
+    if (!hasPermission(ctx, 'manageCatalogue')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can reorder categories');
     }
     const businessId = toObjectId(ctx.businessId!);
 
@@ -136,8 +137,8 @@ export class CatalogueService {
   // --- SERVICES ---
 
   async createService(ctx: RequestContext, data: any): Promise<IService> {
-    if (ctx.role !== 'owner') {
-      throw new AppError(403, 'FORBIDDEN', 'Only owner can create services');
+    if (!hasPermission(ctx, 'manageCatalogue')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can create services');
     }
 
     const businessId = toObjectId(ctx.businessId!);
@@ -191,8 +192,8 @@ export class CatalogueService {
 
     const before = service.toObject();
 
-    // Manager with editBranchPrices flag can only update branchPrices for assigned branches
-    if (ctx.role === 'manager') {
+    // Manager without manageCatalogue can only update branchPrices for assigned branches
+    if (ctx.role === 'manager' && !hasPermission(ctx, 'manageCatalogue')) {
       if (!updates.branchPrices) {
         throw new AppError(403, 'FORBIDDEN', 'Managers can only edit branch prices');
       }
@@ -214,8 +215,8 @@ export class CatalogueService {
           });
         }
       }
-    } else if (ctx.role === 'owner') {
-      // Owner can update everything
+    } else if (hasPermission(ctx, 'manageCatalogue')) {
+      // Owner (or manager with manageCatalogue) can update everything
       if (updates.categoryId) {
         if (!(await Category.exists({ _id: toObjectId(updates.categoryId), businessId }))) {
           throw new AppError(404, 'NOT_FOUND', 'Category not found');
@@ -263,8 +264,8 @@ export class CatalogueService {
   }
 
   async deleteOrDeactivateService(ctx: RequestContext, id: string): Promise<IService> {
-    if (ctx.role !== 'owner') {
-      throw new AppError(403, 'FORBIDDEN', 'Only owner can deactivate services');
+    if (!hasPermission(ctx, 'manageCatalogue')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can deactivate services');
     }
     const businessId = toObjectId(ctx.businessId!);
     const service = await Service.findOne({ _id: toObjectId(id), businessId });
@@ -465,8 +466,8 @@ export class CatalogueService {
     changeBps: number,
     branchId?: string
   ): Promise<{ updatedCount: number }> {
-    if (ctx.role !== 'owner') {
-      throw new AppError(403, 'FORBIDDEN', 'Only owner can apply bulk price changes');
+    if (!hasPermission(ctx, 'manageCatalogue')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can apply bulk price changes');
     }
 
     const businessId = toObjectId(ctx.businessId!);
@@ -514,8 +515,8 @@ export class CatalogueService {
   // --- PRODUCTS ---
 
   async createProduct(ctx: RequestContext, data: any): Promise<IProduct> {
-    if (ctx.role !== 'owner') {
-      throw new AppError(403, 'FORBIDDEN', 'Only owner can create products');
+    if (!hasPermission(ctx, 'manageCatalogue')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can create products');
     }
 
     const businessId = toObjectId(ctx.businessId!);
@@ -554,8 +555,8 @@ export class CatalogueService {
   }
 
   async updateProduct(ctx: RequestContext, id: string, updates: any): Promise<IProduct> {
-    if (ctx.role !== 'owner') {
-      throw new AppError(403, 'FORBIDDEN', 'Only owner can update products');
+    if (!hasPermission(ctx, 'manageCatalogue')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can update products');
     }
 
     const businessId = toObjectId(ctx.businessId!);

@@ -108,6 +108,7 @@ export interface IBill extends Document {
   approval?: {
     reasons: ('discount_over_limit' | 'partly_paid')[];
     requestedAt: Date;
+    requestedBy?: Types.ObjectId;
     decidedBy?: Types.ObjectId;
     decidedAt?: Date;
     rejectReason?: string;
@@ -232,6 +233,7 @@ const billSchema = new Schema<IBill>(
     approval: {
       reasons: [{ type: String, enum: ['discount_over_limit', 'partly_paid'] }],
       requestedAt: { type: Date },
+      requestedBy: { type: Schema.Types.ObjectId, ref: 'users' },
       decidedBy: { type: Schema.Types.ObjectId, ref: 'users' },
       decidedAt: { type: Date },
       rejectReason: { type: String },

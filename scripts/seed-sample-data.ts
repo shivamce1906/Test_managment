@@ -79,6 +79,18 @@ async function main() {
     log('exists ', 'branch TST2');
   }
 
+  // Second manager covering both branches, with a different flag set from manager@glox.test
+  if (await User.exists({ email: 'manager2@glox.test' }).setOptions({ skipTenantScope: true })) {
+    log('exists ', 'manager2@glox.test');
+  } else {
+    await businessService.createManager(ownerCtx, {
+      name: 'Second Manager', email: 'manager2@glox.test', phone: '9800000045', password: 'Test@1234',
+      branchIds: [branch1._id.toString(), branch2!._id.toString()],
+      flags: { manageStaff: true, approvePO: false, viewPayroll: false, editBranchPrices: false, editBranch: true, maxDiscountBps: 1500 },
+    });
+    log('created', 'manager2@glox.test (TST1 + TST2; no payroll, no PO approval; can edit branches)');
+  }
+
   // Categories (Hair > Colour is a sub-category)
   const category = async (name: string, gender: 'men' | 'women' | 'unisex', order: number, parentId?: string) => {
     const found = await Category.findOne({ businessId, name });
@@ -265,12 +277,12 @@ async function main() {
   if (!run) {
     await createMonthlyRun(ownerCtx, branch1._id, { month });
     log('created', `payroll draft TST1 ${month}`);
-  } else if (run.status === 'draft' || run.status === 'reviewed') {
-    await createMonthlyRun(ownerCtx, branch1._id, { month });
-    log('exists ', `payroll draft TST1 ${month} (recalculated)`);
+  } else {
+    // Left as is: it may have been reviewed or adjusted on screen
+    log('exists ', `payroll run TST1 ${month} (${run.status})`);
   }
 
-  console.log('\nDone. Logins: owner@glox.test, manager@glox.test, branch@glox.test (TST1), branch2@glox.test (TST2) — Test@1234');
+  console.log('\nDone. Logins: owner@glox.test, manager@glox.test (TST1), manager2@glox.test (TST1 + TST2), branch@glox.test (TST1), branch2@glox.test (TST2) — Test@1234');
 }
 
 main()

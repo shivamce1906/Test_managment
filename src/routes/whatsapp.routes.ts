@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { guardedRouter } from './guarded-router';
 import { authenticate } from '../middlewares/auth.middleware';
 import { requireRole, requireKind } from '../middlewares/role.middleware';
+import { requirePermission } from '../middlewares/permission.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import {
   sendWaMessageSchema,

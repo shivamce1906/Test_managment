@@ -693,7 +693,7 @@ export class BusinessService {
     const branchId = toObjectId(branchIdStr);
 
     if (ctx.role === 'manager' && !ctx.branchIds.includes(branchIdStr)) {
-      throw new AppError(403, 'FORBIDDEN', 'Access to branch denied');
+      throw new AppError(403, 'FORBIDDEN', 'You do not have access to this branch');
     }
 
     const branch = await Branch.findOne({ _id: branchId, businessId: toObjectId(ctx.businessId!) });

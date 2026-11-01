@@ -304,13 +304,14 @@ describe('Customer phone masking (PRD §3)', () => {
 
   const listOf = (body: any) => body.customers || body;
 
-  it('owner sees full numbers in the list', async () => {
-    const res = await as(w.tokens.owner).get('/customers');
+  // Decided 2026-10-31: managers see full numbers like the owner; only branch logins are masked
+  it.each(['owner', 'manager'] as const)('%s sees full numbers in the list', async (who) => {
+    const res = await as(w.tokens[who]).get('/customers');
     expect(listOf(res.body).find((c: any) => c.name === 'Priya Shah').phone).toBe('+919876543210');
   });
 
-  it.each(['manager', 'branchA'] as const)('%s sees masked numbers in lists', async (who) => {
-    const res = await as(w.tokens[who]).get('/customers');
+  it('branch login sees masked numbers in lists', async () => {
+    const res = await as(w.tokens.branchA).get('/customers');
     const c = listOf(res.body).find((c: any) => c.name === 'Priya Shah');
     expect(c.phone).toBe('98XXXXXX10');
   });

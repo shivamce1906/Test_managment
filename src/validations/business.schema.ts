@@ -115,7 +115,16 @@ export const updateBranchSchema = z.object({
     open: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
     close: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
     closed: z.boolean(),
-  })).optional(),
+  })).superRefine((hours, refine) => {
+    const seen = new Set<number>();
+    hours.forEach((h, i) => {
+      if (seen.has(h.day)) refine.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'day'], message: 'Each weekday may appear only once' });
+      seen.add(h.day);
+      if (h.closed) return;
+      if (!h.open || !h.close) refine.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'open'], message: 'Opening and closing times are required on open days' });
+      else if (h.open >= h.close) refine.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'close'], message: 'close must be after open' });
+    });
+  }).optional(),
   holidays: z.array(z.object({
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     name: z.string(),
@@ -186,6 +195,13 @@ export const createManagerSchema = z.object({
     approvePO: z.boolean().optional(),
     viewPayroll: z.boolean().optional(),
     editBranchPrices: z.boolean().optional(),
+    editBranch: z.boolean().optional(),
+    manageCatalogue: z.boolean().optional(),
+    manageCustomers: z.boolean().optional(),
+    manageFinance: z.boolean().optional(),
+    managePayroll: z.boolean().optional(),
+    exportAudit: z.boolean().optional(),
+    manageMarketing: z.boolean().optional(),
     maxDiscountBps: z.number().int().nonnegative().optional(),
   }).optional(),
   staffId: objectIdSchema.optional(),
@@ -198,6 +214,13 @@ export const updateManagerSchema = z.object({
     approvePO: z.boolean().optional(),
     viewPayroll: z.boolean().optional(),
     editBranchPrices: z.boolean().optional(),
+    editBranch: z.boolean().optional(),
+    manageCatalogue: z.boolean().optional(),
+    manageCustomers: z.boolean().optional(),
+    manageFinance: z.boolean().optional(),
+    managePayroll: z.boolean().optional(),
+    exportAudit: z.boolean().optional(),
+    manageMarketing: z.boolean().optional(),
     maxDiscountBps: z.number().int().nonnegative().optional(),
   }).optional(),
   status: z.enum(['active', 'inactive']).optional(),

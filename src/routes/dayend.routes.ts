@@ -2,6 +2,7 @@ import { guardedRouter } from './guarded-router';
 import { authenticate } from '../middlewares/auth.middleware';
 import { requireRole, requireKind } from '../middlewares/role.middleware';
 import { requireBranchAccess } from '../middlewares/branch.middleware';
+import { requirePermission } from '../middlewares/permission.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import {
   createExpenseSchema,
@@ -24,7 +25,7 @@ export const dayendRouter = guardedRouter(authenticate(), requireKind('tenant'))
 dayendRouter.post('/branches/:branchId/expenses', requireBranchAccess, validate({ body: createExpenseSchema }), DayendController.createExpense);
 dayendRouter.get('/branches/:branchId/expenses', requireBranchAccess, validate({ query: listExpensesQuerySchema }), DayendController.getExpenses);
 dayendRouter.patch('/expenses/:id', requireRole('owner', 'manager'), validate({ params: idParamSchema, body: updateExpenseSchema }), DayendController.updateExpense);
-dayendRouter.delete('/expenses/:id', requireRole('owner'), validate({ params: idParamSchema }), DayendController.deleteExpense);
+dayendRouter.delete('/expenses/:id', requireRole('owner', 'manager'), requirePermission('manageFinance'), validate({ params: idParamSchema }), DayendController.deleteExpense);
 
 // 2. Recurring Expenses
 dayendRouter.post('/branches/:branchId/recurring-expenses', requireBranchAccess, requireRole('owner', 'manager'), validate({ body: createRecurringExpenseSchema }), DayendController.createRecurringExpense);
@@ -38,4 +39,4 @@ dayendRouter.get('/branches/:branchId/petty-cash', requireBranchAccess, validate
 dayendRouter.get('/branches/:branchId/closures/:date', validate({ params: closureParamsSchema }), requireBranchAccess, DayendController.getDayClosure);
 dayendRouter.post('/branches/:branchId/closures/:date/submit', validate({ params: closureParamsSchema }), requireBranchAccess, validate({ body: submitDayClosureSchema }), DayendController.submitDayClosure);
 dayendRouter.post('/branches/:branchId/closures/:date/approve', validate({ params: closureParamsSchema }), requireBranchAccess, requireRole('owner', 'manager'), DayendController.approveDayClosure);
-dayendRouter.post('/branches/:branchId/closures/:date/reopen', validate({ params: closureParamsSchema }), requireBranchAccess, requireRole('owner'), validate({ body: reopenDayClosureSchema }), DayendController.reopenDayClosure);
+dayendRouter.post('/branches/:branchId/closures/:date/reopen', validate({ params: closureParamsSchema }), requireBranchAccess, requireRole('owner', 'manager'), requirePermission('manageFinance'), validate({ body: reopenDayClosureSchema }), DayendController.reopenDayClosure);

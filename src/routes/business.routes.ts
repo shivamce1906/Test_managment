@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { authenticate } from '../middlewares/auth.middleware';
 import { requireRole, requireKind } from '../middlewares/role.middleware';
+import { requirePermission } from '../middlewares/permission.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import {
   updateBusinessSettingsSchema,
@@ -26,7 +27,8 @@ businessRouter.patch('/settings', requireRole('owner'), validate({ body: updateB
 
 // 2. Branches
 businessRouter.get('/branches', requireRole('owner', 'manager', 'branch'), BusinessController.getBranches);
-businessRouter.patch('/branches/:branchId', requireRole('owner'), validate({ params: z.object({ branchId: objectIdSchema }), body: updateBranchSchema }), BusinessController.updateBranch);
+// Managers need the editBranch flag and may edit only their own branches (checked in the service)
+businessRouter.patch('/branches/:branchId', requireRole('owner', 'manager'), requirePermission('editBranch'), validate({ params: z.object({ branchId: objectIdSchema }), body: updateBranchSchema }), BusinessController.updateBranch);
 businessRouter.post('/branch-requests', requireRole('owner'), validate({ body: createBranchRequestSchema }), BusinessController.createBranchRequest);
 
 // 3. Managers
@@ -35,10 +37,11 @@ businessRouter.patch('/managers/:id', requireRole('owner'), validate({ params: i
 businessRouter.get('/managers', requireRole('owner'), BusinessController.getManagers);
 
 // 4. Branch Logins
-businessRouter.get('/branch-logins', requireRole('owner'), BusinessController.getBranchLogins);
+// Managers see and toggle markAttendance on the logins of their own branches (checked in the service)
+businessRouter.get('/branch-logins', requireRole('owner', 'manager'), BusinessController.getBranchLogins);
 businessRouter.patch(
   '/branch-logins/:id',
-  requireRole('owner'),
+  requireRole('owner', 'manager'),
   validate({ params: idParamSchema, body: updateBranchLoginFlagsSchema }),
   BusinessController.updateBranchLoginFlags
 );

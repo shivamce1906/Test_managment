@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticate } from '../middlewares/auth.middleware';
 import { requireRole, requireKind } from '../middlewares/role.middleware';
+import { requirePermission } from '../middlewares/permission.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import {
   createCustomerSchema,
@@ -19,7 +20,7 @@ customerRouter.use(authenticate(), requireKind('tenant'));
 
 customerRouter.post('/', validate({ body: createCustomerSchema }), customerController.createCustomer);
 customerRouter.get('/', validate({ query: listCustomersQuerySchema }), customerController.getCustomers);
-customerRouter.get('/export', requireRole('owner'), customerController.exportCustomers);
+customerRouter.get('/export', requireRole('owner', 'manager'), requirePermission('manageCustomers'), customerController.exportCustomers);
 customerRouter.post('/merge', requireRole('owner', 'manager'), validate({ body: mergeCustomerSchema }), customerController.mergeCustomers);
 customerRouter.get('/:id', validate({ params: idParamSchema }), customerController.getCustomerById);
 customerRouter.patch('/:id', validate({ params: idParamSchema, body: updateCustomerSchema }), customerController.updateCustomer);

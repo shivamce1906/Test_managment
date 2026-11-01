@@ -3,6 +3,7 @@ import { AuditLog, IAuditLog } from '../models';
 import { RequestContext, toObjectId } from './context';
 import { AppError } from '../utils';
 import ExcelJS from 'exceljs';
+import { hasPermission } from '../middlewares/permission.middleware';
 
 export interface LogActionParams {
   ctx?: RequestContext;
@@ -148,8 +149,8 @@ export async function queryAuditLogs(
 }
 
 export async function exportAuditLogs(ctx: RequestContext, filters: any): Promise<Buffer> {
-  if (ctx.role !== 'owner' && ctx.role !== 'superadmin' && ctx.role !== 'super_admin') {
-    throw new AppError(403, 'FORBIDDEN', 'Only owner or superadmin can export audit logs');
+  if (!hasPermission(ctx, 'exportAudit')) {
+    throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with audit export access) can export audit logs');
   }
 
   const { logs } = await queryAuditLogs(ctx, { ...filters, limit: 5000, page: 1 });

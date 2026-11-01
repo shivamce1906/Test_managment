@@ -10,6 +10,8 @@ The owner runs the whole salon: every branch, the team, the catalogue, staff, th
 | **4. Insights · Payroll** | Insights · Team → Payroll | Dashboard, 13 reports + Excel, audit log, payroll runs, payslip PDFs | ✅ Ready — §20–§25 |
 | Later | Front desk → Leads, WhatsApp · Marketing | | Later |
 
+The **manager panel** reuses these endpoints; its differences are in [MANAGER_API_GUIDE.md](MANAGER_API_GUIDE.md).
+
 Login, refresh, logout and the axios client are covered in [AUTH_API_GUIDE.md](AUTH_API_GUIDE.md). This guide builds on them.
 
 ---
@@ -86,7 +88,7 @@ Suggested build order: app shell → settings → branches → catalogue → sta
 
 ## 2. Session: `GET /auth/me`
 
-Call it after login and on reload. For salon logins it now also returns the **business** and the **branches the user can open**: all of them for an owner, only the assigned ones for a manager or branch login. The existing `user` block is unchanged.
+Call it after login and on reload. For salon logins it now also returns the **business** and the **branches the user can open**: all of them for an owner, only the assigned ones for a manager or branch login. It also returns a read-only **`config`** block (GST, FY start, effective discount limit, loyalty rules, payroll switches) for every salon role; see [MANAGER_API_GUIDE.md §3](MANAGER_API_GUIDE.md#3-session-and-config-get-authme). The existing `user` block is unchanged.
 
 **200** (owner)
 
@@ -146,7 +148,7 @@ Call it after login and on reload. For salon logins it now also returns the **bu
 | --- | --- |
 | `gst` | `enabled` turns bills into tax invoices; `gstin` is required when enabled; `rateBps` (1800 = 18 %); `pricesInclusive`: service prices already include GST |
 | `fyStartMonth` | 1–12 (4 = April); used for invoice numbering and reports |
-| `discountLimits` | Highest bill discount a **manager** (`managerBps`) or **branch login** (`branchBps`) can give without approval; bigger discounts go to approval. `ownerAlertBps` is meant to alert the owner above that level ⚠️ stored, but not used yet (Phase 2, billing) |
+| `discountLimits` | Highest bill discount a **manager** (`managerBps`) or **branch login** (`branchBps`) can give without approval; bigger discounts go to approval. Above `ownerAlertBps` the owner gets an in-app alert (§14.5) |
 | `dayEndReportTime` | `HH:mm` when the day-end report goes to `ownerWhatsappPhone` |
 | `loyalty` | `earnPer100` points per ₹100; a point is worth `redeemValuePaise`; `minRedeem` points minimum; points expire after `expiryDays` |
 | `payroll` | PF, ESI and PT apply only when `enabled` here, even if a staff member's own flag is on |
@@ -220,6 +222,9 @@ Owner-editable fields: `hours`, `holidays`, `stations`, `googleReviewUrl` and `p
 
 **200**: the branch with the new values. Appointments then follow these hours: a booking outside opening hours or on a holiday is rejected.
 
+- **Hours validation:** each weekday at most once; open days need `open` and `close`, with `open` before `close` (`400` with e.g. `fields["hours.0.close"]`).
+- **Managers** with the `editBranch` flag can make the same change for their own branches.
+
 ### `POST /business/branch-requests` — ask Super Admin to add or close a branch
 
 Add a branch:
@@ -254,10 +259,19 @@ A manager works in their **assigned branches** only. Permission flags:
 | Flag | Lets the manager… |
 | --- | --- |
 | `manageStaff` | add and edit staff in their branches |
-| `approvePO` | approve purchase orders (Phase 3) |
-| `viewPayroll` | see payroll (Phase 3) |
+| `approvePO` | approve purchase orders (§16.3) |
+| `viewPayroll` | see payroll and prepare drafts (§24); locking needs `managePayroll` too |
 | `editBranchPrices` | change service prices for their branches |
-| `maxDiscountBps` | optional personal discount cap ⚠️ stored, but billing still uses `discountLimits.managerBps`. Wired up in Phase 2 |
+| `editBranch` *(new)* | edit hours, holidays, stations, review link and petty-cash float of their branches ([MANAGER_API_GUIDE.md §5](MANAGER_API_GUIDE.md#5-branch-settings-new-for-managers)) |
+| `maxDiscountBps` | optional personal discount cap; replaces `discountLimits.managerBps` for this manager |
+| `manageCatalogue` *(new)* | create, edit and delete categories, services, products and plans (**all branches**) |
+| `manageCustomers` *(new)* | customer export, wallet adjustment, plan transfer |
+| `manageFinance` *(new)* | delete expenses, reopen a closed day (their branches) |
+| `managePayroll` *(new)* | lock payroll and mark it paid (their branches; needs `viewPayroll`) |
+| `exportAudit` *(new)* | export the audit log (their branches' entries) |
+| `manageMarketing` *(new)* | create WhatsApp campaigns, switch automations on or off |
+
+All new flags are optional and off by default; flags you don't send keep their value. Details and the UI checklist: [MANAGER_API_GUIDE.md §7](MANAGER_API_GUIDE.md#7-owner-granted-access-the-six-new-flags) and [§9](MANAGER_API_GUIDE.md#9-frontend-implementation-checklist).
 
 #### `GET /business/managers`
 
@@ -281,7 +295,7 @@ A manager works in their **assigned branches** only. Permission flags:
 {
   "name": "Ravi Verma", "email": "ravi@glox.test", "phone": "9800000044", "password": "Manager@123",
   "branchIds": ["6ae2fcc4d27d0ed7a1a0e260"],
-  "flags": { "manageStaff": true, "approvePO": true, "viewPayroll": false, "editBranchPrices": false, "maxDiscountBps": 1500 }
+  "flags": { "manageStaff": true, "approvePO": true, "viewPayroll": false, "editBranchPrices": false, "editBranch": false, "maxDiscountBps": 1500 }
 }
 ```
 
@@ -317,7 +331,7 @@ Any of `branchIds`, `flags` (merged with the current flags), `status` (`active`/
 
 ### Branch logins
 
-One shared login per branch for the reception desk. Super Admin creates them; the owner only toggles `markAttendance`, which lets that front desk mark staff attendance.
+One shared login per branch for the reception desk. Super Admin creates them; the owner (or a manager, for their own branches) only toggles `markAttendance`, which lets that front desk mark staff attendance.
 
 #### `GET /business/branch-logins`
 
@@ -710,7 +724,7 @@ Build `inAt`/`outAt` from the date and an IST time: `new Date(\`${date}T${time}:
 ```
 
 - `payFromTill: true` also records a cash **till expense** (`salary_advance`) for that day, so day-end cash matches. `expenseId` points to it.
-- Payroll deducts up to `recoveryPerMonthPaise` each month until the advance is recovered (documented in Phase 3).
+- Payroll deducts up to `recoveryPerMonthPaise` each month until the advance is recovered (§24.2).
 - The staff member must be in this branch → otherwise `404`.
 
 #### `GET /staff/branches/:branchId/advances?staffId=&status=open|closed`
@@ -917,15 +931,15 @@ Customers, the calendar, billing and approvals. These endpoints are **shared by 
 | Action | Owner | Manager | Branch login |
 | --- | --- | --- | --- |
 | Customers: list, view, create, edit, add notes | ✅ all | ✅ | ✅ |
-| Customer phone and email in responses | Full | Masked (`98XXXXXX01`) | Masked |
-| Reveal a phone (`POST /customers/:id/reveal`) | ✅ | ✅ audited | ✅ audited |
+| Customer phone and email in responses | Full | Full | Masked (`98XXXXXX01`) |
+| Reveal a phone (`POST /customers/:id/reveal`) | ✅ | ✅ | ✅ audited |
 | Merge duplicates | ✅ | ✅ | ❌ |
 | Export to Excel | ✅ | ❌ | ❌ |
 | Calendar, booking, walk-in, reschedule, status, staff blocks | ✅ every branch | ✅ own branches | ✅ own branch |
 | Create a bill | ✅ | ✅ | ✅ (`billedByStaffId` required) |
 | Discount without approval | Unlimited | Up to `flags.maxDiscountBps`, else `discountLimits.managerBps` | Up to `discountLimits.branchBps` |
 | Part-paid bill (a due) without approval | ✅ | Needs approval | Needs approval |
-| Approve or reject held bills | ✅ every branch | ✅ own branches | ❌ |
+| Approve or reject held bills | ✅ every branch | ✅ own branches, not bills they sent for approval | ❌ |
 | Edit, cancel, refund a bill | ✅ (also on a closed day) | ✅ own branches, not on a closed day | ❌ |
 | Collect dues | ✅ | ✅ | ✅ |
 
@@ -995,11 +1009,11 @@ A phone that already exists:
 
 ### `GET /customers/:id`, `PATCH /customers/:id`
 
-`PATCH` takes any create field and changes only what you send. Responses are masked for managers and branch logins.
+`PATCH` takes any create field and changes only what you send. Responses are masked for branch logins.
 
 ### `POST /customers/:id/reveal`
 
-**200** `{ "phone": "+919876500001" }`. For a manager or branch login this writes a `customer.phone_reveal` audit entry. Show it on a "tap to call" button rather than storing it.
+**200** `{ "phone": "+919876500001" }`. For a branch login this writes a `customer.phone_reveal` audit entry. Show it on a "tap to call" button rather than storing it.
 
 ### `POST /customers/:id/notes` — service note (colour formula, skin type…)
 
@@ -1079,7 +1093,7 @@ An `.xlsx` file (`Content-Disposition: attachment`). Download it with `responseT
 - **Columns:** `staff` holds the bookable staff, everyone except receptionists and managers.
 - **Placing appointments:** put each **line** in its stylist's column. One appointment can have lines with different stylists.
 - **Greying out unavailable time:** use the branch hours (`GET /business/branches`), each stylist's `rosters` (an override for the date wins over `weekly`), approved `leaves`, and `staffBlocks`.
-- Customer phones are masked for managers and branch logins.
+- Customer phones are masked for branch logins.
 
 ### `GET /branches/:branchId/availability?serviceId=&date=&staffId=&stepMin=`
 
@@ -1178,7 +1192,7 @@ Starts at the next 5-minute mark with the first free stylist. Services run back 
 
 ### `GET /appointments/:id`
 
-The appointment, with the customer (name and phone, masked for staff), services and staff names filled in.
+The appointment, with the customer (name and phone, masked for branch logins), services and staff names filled in.
 
 ### Staff blocks
 
@@ -1323,6 +1337,7 @@ Send the header `Idempotency-Key: <uuid>`. Generate it once when the screen open
 | **Reject** | `rejected`; nothing is applied; the invoice number stays used |
 | `decision` | must be exactly `approve` or `reject` (400 otherwise); reject needs a `reason` |
 | Already decided | `422 INVALID_TRANSITION` |
+| A manager deciding a bill they sent for approval (`approval.requestedBy`) | `403 "You cannot approve or reject a bill you sent for approval"` |
 
 Above `discountLimits.ownerAlertBps`, the owner gets an in-app notification (`type: "bill.discount_alert"`) for bills by managers and branch logins.
 
@@ -1518,7 +1533,7 @@ See the `redemptions` row in §14.2.
 
 ### 15.6 `GET /vouchers/:code`
 
-The voucher with its owner (phone masked for staff):
+The voucher with its owner (phone masked for branch logins):
 
 ```json
 { "_id": "6ae315f88f7662f81c212408", "voucherCode": "GV-XYJ4XPM4", "customerId": { "_id": "6ae3157ff1687a9fa5051388", "name": "Sneha Kapoor", "phone": "98XXXXXX06" }, "planSnap": { "type": "voucher", "name": "₹1,000 Gift Voucher", "voucher": { "valuePaise": 100000 } }, "validFrom": "2026-10-29", "validTill": "2027-01-27", "status": "active" }
@@ -1896,7 +1911,7 @@ window.open(url, '_blank'); // or set it as an <iframe> src and call iframe.cont
 | --- | --- |
 | Routing (report #1) | Feature routers' guards run only for their own routes: branch logins reach stock, day-end, inbox and notifications again; the public webhook needs no token. A Super Admin token on salon routes → 403 (not 500). Managers mark attendance without a flag (the flag is for branch logins). Managers can read their branches' audit log |
 | Indexes (report #3) | The app builds the schema indexes on connect when `DB_AUTO_INDEX=true` (on in tests). `scripts/check-duplicates.ts` (read-only) and `scripts/build-indexes.ts` were added. The voucher-code index is now partial (the compound sparse one allowed only one non-voucher plan per business) |
-| Customers | Merge moves in the right direction (`POST /customers/:id/merge` added) and moves dues, receipts and leads too; `altPhones` saved; an edited phone is normalised; real date validation; responses masked for staff; plain-text search; `tags`; history 404 and limits; export owner only; a parallel duplicate phone → 409 `DUPLICATE_PHONE`; non-phone input → 400 |
+| Customers | Merge moves in the right direction (`POST /customers/:id/merge` added) and moves dues, receipts and leads too; `altPhones` saved; an edited phone is normalised; real date validation; responses masked for branch logins (managers see full numbers since 2026-10-31); plain-text search; `tags`; history 404 and limits; export owner only; a parallel duplicate phone → 409 `DUPLICATE_PHONE`; non-phone input → 400 |
 | Calendar | Clashes checked per line (including two lines of one booking); eligibility by service *and* staff; customer must belong to the business; "any available" skips receptionists and managers; walk-in fixed; `billed` only via a bill; staff blocks validated and branch-checked; branch scoping by id. New: availability, reschedule, a richer calendar response, SRS path aliases |
 | Billing | Staff on lines are checked, names snapshotted, commission falls back to the staff member's own, product commission works, slab commission works, splits never overpay; services hidden in a branch can't be billed; consumable and product cost recorded; membership discounts services only; the server values loyalty and vouchers; overpayment rejected; collected dues must be paid; Idempotency-Key honoured (also under races); manager `maxDiscountBps` and owner alerts; approve, reject, cancel, refund, edit and view scoped to the user's branches; `decision` validated; edit works (#7) with full reversal; cancel reverses stats, the day's totals, loyalty, dues collected and sold plans/credit; held and rejected bills handled; refunds counted on their own day; due receipts capped and counted in the day's takings; preview without a customer. New: invoice PDF (A4 and thermal) |
 | Plans | Selling works (the plan lookup used to crash), validity uses business dates, vouchers get unique `GV-` codes, the last-session race is safe, expired and out-of-branch plans are refused, used vouchers are refused, plan creation is validated by type and owner-only, price is immutable, invalid changes → 422, expired plans shown as expired. New: `GET /customers/:id/wallet`, `/loyalty` |

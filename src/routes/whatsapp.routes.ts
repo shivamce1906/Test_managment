@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { guardedRouter } from './guarded-router';
 import { authenticate } from '../middlewares/auth.middleware';
 import { requireRole, requireKind } from '../middlewares/role.middleware';
+import { requirePermission } from '../middlewares/permission.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import {
   sendWaMessageSchema,
@@ -34,9 +35,9 @@ whatsappAuthed.get('/whatsapp/templates', WhatsappController.getTemplates);
 whatsappAuthed.post('/whatsapp/templates/sync', requireRole('owner'), WhatsappController.syncTemplates);
 
 // 5. Campaigns
-whatsappAuthed.post('/whatsapp/campaigns', requireRole('owner', 'manager'), validate({ body: createWaCampaignSchema }), WhatsappController.createCampaign);
+whatsappAuthed.post('/whatsapp/campaigns', requireRole('owner', 'manager'), requirePermission('manageMarketing'), validate({ body: createWaCampaignSchema }), WhatsappController.createCampaign);
 whatsappAuthed.get('/whatsapp/campaigns', WhatsappController.getCampaigns);
 
 // 6. Automations
 whatsappAuthed.get('/whatsapp/automations', WhatsappController.getAutomations);
-whatsappAuthed.patch('/whatsapp/automations/:key', requireRole('owner', 'manager'), validate({ body: updateWaAutomationSchema }), WhatsappController.updateAutomation);
+whatsappAuthed.patch('/whatsapp/automations/:key', requireRole('owner', 'manager'), requirePermission('manageMarketing'), validate({ body: updateWaAutomationSchema }), WhatsappController.updateAutomation);

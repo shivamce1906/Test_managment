@@ -16,6 +16,13 @@ export interface IUser extends Document {
     approvePO?: boolean;
     viewPayroll?: boolean;
     editBranchPrices?: boolean;
+    editBranch?: boolean;
+    manageCatalogue?: boolean;
+    manageCustomers?: boolean;
+    manageFinance?: boolean;
+    managePayroll?: boolean;
+    exportAudit?: boolean;
+    manageMarketing?: boolean;
     maxDiscountBps?: number;
     markAttendance?: boolean;
   };
@@ -45,6 +52,13 @@ const userSchema = new Schema<IUser>(
       approvePO: { type: Boolean, default: false },
       viewPayroll: { type: Boolean, default: false },
       editBranchPrices: { type: Boolean, default: false },
+      editBranch: { type: Boolean, default: false },
+      manageCatalogue: { type: Boolean, default: false },
+      manageCustomers: { type: Boolean, default: false },
+      manageFinance: { type: Boolean, default: false },
+      managePayroll: { type: Boolean, default: false },
+      exportAudit: { type: Boolean, default: false },
+      manageMarketing: { type: Boolean, default: false },
       maxDiscountBps: { type: Number },
       markAttendance: { type: Boolean, default: false },
     },

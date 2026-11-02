@@ -56,6 +56,14 @@ export const createBillSchema = z.object({
   tips: z.array(tipInputSchema).default([]),
   payments: z.array(paymentInputSchema).default([]),
   collectDues: z.array(collectDueInputSchema).optional(),
+  marketingOffer: z
+    .object({
+      offerId: objectIdSchema.optional(),
+      code: z.string().optional(),
+      campaignId: objectIdSchema.optional(),
+      discountPaise: z.number().int().min(0).default(0),
+    })
+    .optional(),
 });
 
 // Edit: lines are re-sent in full; payments/tips/billDiscount left out keep their current values

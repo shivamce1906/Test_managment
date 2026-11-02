@@ -324,7 +324,8 @@ export async function sendMessage(
     apiKey: token,
     userToken: token,
     uid,
-    campaignName: templateName || 'direct_message',
+    templateName,
+    campaignName: templateName,
     destination: conv.phone,
     userName: 'Customer',
     templateParams: input.variables,
@@ -532,7 +533,7 @@ export async function processInboundWebhook(
 
   const business = await Business.findById(waNum.businessId);
   const headBranch = business?.headBranchId
-    ? await Branch.findById(business.headBranchId)
+    ? await Branch.findOne({ _id: business.headBranchId, businessId: waNum.businessId })
     : await Branch.findOne({ businessId: waNum.businessId }).sort({ createdAt: 1 });
 
   const defaultBranchId = waNum.branchIds.length > 0

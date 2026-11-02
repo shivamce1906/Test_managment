@@ -49,7 +49,8 @@ export class InstantBroadcastAdapter {
    */
   async sendMessage(options: SendMessageOptions): Promise<SendMessageResult> {
     const targetPhone = options.phone || options.destination || '';
-    const tmpl = options.templateName || options.campaignName;
+    const isTemplate = options.kind === 'template' || Boolean(options.templateName);
+    const tmpl = isTemplate ? (options.templateName || options.campaignName) : undefined;
     const token = options.userToken || options.apiKey;
     logger.info(
       { phone: targetPhone, kind: options.kind, template: tmpl, uid: options.uid },
@@ -59,33 +60,52 @@ export class InstantBroadcastAdapter {
     const mockId = `ib_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const costPaise = options.kind === 'template' || tmpl ? 80 : 40;
 
-    // When configured with a real API token and live network, we can make the HTTP call:
+    // When configured with a real API token and live network, we make the live Instant Broadcast call:
     if (token && token !== 'mock-aisensy-key' && token !== 'key' && !token.startsWith('mock')) {
       try {
-        const response = await fetch(`${this.baseUrl}/api/v1/messages/send`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-            ...(options.uid ? { 'X-Account-UID': options.uid } : {}),
-          },
-          body: JSON.stringify({
-            phone: targetPhone,
-            type: options.kind || (tmpl ? 'template' : 'text'),
-            message: options.text,
-            templateName: tmpl,
-            params: options.variables || options.templateParams,
-            mediaUrl: options.mediaUrl,
-            fileName: options.fileName,
-          }),
-        });
+        const cleanPhone = targetPhone.replace(/\D/g, '');
+        let response: Response;
+
+        if (tmpl) {
+          response = await fetch(`${this.baseUrl}/api/v1/send_templet?token=${encodeURIComponent(token)}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              sendTo: cleanPhone,
+              token,
+              templetName: tmpl,
+              exampleArr: options.variables || options.templateParams || [],
+            }),
+          });
+        } else {
+          response = await fetch(`${this.baseUrl}/api/v1/send-message?token=${encodeURIComponent(token)}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              messageObject: {
+                to: cleanPhone,
+                type: 'text',
+                text: {
+                  body: options.text || '',
+                },
+              },
+            }),
+          });
+        }
 
         if (response.ok) {
           const resData: any = await response.json();
+          const providerMsgId = resData.data?.id || resData.messageId || resData.id || mockId;
           return {
             success: true,
-            messageId: resData.messageId || resData.id || mockId,
-            providerMessageId: resData.providerMessageId || resData.messageId || resData.id || mockId,
+            messageId: providerMsgId,
+            providerMessageId: providerMsgId,
             status: 'sent',
             costPaise,
             lowBalance: Boolean(resData.lowBalance),

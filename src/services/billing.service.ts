@@ -24,6 +24,8 @@ import {
   PayrollRun,
   withTransaction,
   IBill,
+  Campaign,
+  MarketingOffer,
 } from '../models';
 import {
   AppError,
@@ -629,10 +631,39 @@ export class BillingService {
       approval: status === 'awaiting_approval' ? { reasons: approvalReasons, requestedAt: new Date(), requestedBy: toObjectId(ctx.userId) } : undefined,
       version: 1,
       refunds: [],
+      marketingOffer: draft.marketingOffer
+        ? {
+            offerId: draft.marketingOffer.offerId ? toObjectId(draft.marketingOffer.offerId) : undefined,
+            code: draft.marketingOffer.code,
+            campaignId: draft.marketingOffer.campaignId ? toObjectId(draft.marketingOffer.campaignId) : undefined,
+            discountPaise: draft.marketingOffer.discountPaise || 0,
+          }
+        : undefined,
       idempotencyKey: key,
     });
 
     await bill.save({ session });
+
+    if (draft.marketingOffer?.offerId) {
+      await MarketingOffer.findOneAndUpdate(
+        { _id: toObjectId(draft.marketingOffer.offerId), businessId },
+        { $inc: { totalUsedCount: 1 } },
+        { session }
+      );
+    }
+    if (draft.marketingOffer?.campaignId) {
+      await Campaign.findOneAndUpdate(
+        { _id: toObjectId(draft.marketingOffer.campaignId), businessId },
+        {
+          $inc: {
+            'stats.conversions.billsCount': 1,
+            'stats.conversions.revenuePaise': bill.totals.taxablePaise,
+            'stats.conversions.discountGivenPaise': bill.totals.discountPaise,
+          },
+        },
+        { session }
+      );
+    }
 
     // Effects apply now for a paid/partly paid bill, or later when an approver approves it
     if (status === 'paid' || status === 'partly_paid') {

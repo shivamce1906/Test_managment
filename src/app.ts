@@ -25,6 +25,8 @@ import { dayendRouter } from './routes/dayend.routes';
 import { reportRouter } from './routes/report.routes';
 import { auditRouter } from './routes/audit.routes';
 import { notificationRouter } from './routes/notification.routes';
+import { marketingRouter } from './routes/marketing.routes';
+
 
 export function createApp() {
   const app = express();
@@ -61,6 +63,8 @@ export function createApp() {
   app.use(reportRouter);
   app.use(auditRouter);
   app.use(notificationRouter);
+  app.use('/marketing', marketingRouter);
+
 
   // 404 Handler
   app.use((req, res) => {

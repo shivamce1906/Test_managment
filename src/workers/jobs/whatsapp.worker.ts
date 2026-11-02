@@ -1,4 +1,5 @@
 import { Worker, Job } from 'bullmq';
+import { Types } from 'mongoose';
 import { getBullConnection, sendInstantBroadcastMessage, fetchInstantBroadcastTemplates } from '../../integrations';
 import {
   WaMessage,
@@ -7,9 +8,13 @@ import {
   WaConversation,
   Campaign,
   Customer,
+  MarketingOffer,
+  MarketingSegment,
+  AutomationSend,
 } from '../../models';
 import { logger, decrypt } from '../../utils';
 import { toObjectId } from '../../services';
+import { segmentationService } from '../../services/segmentation.service';
 import { whatsappSendQueue } from '../queues';
 
 export function createWhatsAppWorker(): Worker {
@@ -113,23 +118,64 @@ export function createCampaignWorker(): Worker {
       campaign.status = 'sending';
       await campaign.save();
 
-      // Find target audience
-      const customerFilter: any = { businessId: bId, doNotMessage: { $ne: true } };
-      const segment = campaign.audience?.segment;
-      if (segment && typeof segment === 'object') {
-        if (segment.type === 'vip') {
-          customerFilter.tags = 'VIP';
-        } else if (segment.type === 'lapsed') {
-          const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-          customerFilter['stats.lastVisit'] = { $lt: sixtyDaysAgo };
-        }
+      // Check quiet hours (allowed 09:00 - 21:00 IST)
+      const now = new Date();
+      const istHours = new Date(now.getTime() + 5.5 * 60 * 60 * 1000).getUTCHours();
+      if (istHours < 9 || istHours >= 21) {
+        logger.info({ campaignId, istHours }, 'Campaign send deferred due to quiet hours (09:00-21:00 IST)');
+        // Calculate delay until 09:00 IST
+        campaign.status = 'scheduled';
+        await campaign.save();
+        return;
       }
 
-      const customers = await Customer.find(customerFilter).limit(5000);
+      // Load linked offer if exists
+      let offer: any = null;
+      if (campaign.offerId) {
+        offer = await MarketingOffer.findOne({ _id: campaign.offerId, businessId: bId });
+      }
+
+      // Resolve target audience customers
+      let customerIds: Types.ObjectId[] = [];
+      if (campaign.audience?.kind === 'segment') {
+        let criteria = campaign.audience.segmentCriteria;
+        if (campaign.audience.segmentId) {
+          const seg = await MarketingSegment.findOne({ _id: campaign.audience.segmentId, businessId: bId });
+          if (seg) criteria = seg.criteria;
+        }
+        if (criteria) {
+          customerIds = await segmentationService.resolveEligibleCustomerIds(bId, criteria);
+        } else {
+          customerIds = await Customer.find({
+            businessId: bId,
+            doNotMessage: { $ne: true },
+            waOptIn: { $ne: false },
+          }).distinct('_id');
+        }
+      } else if (campaign.audience?.kind === 'selection' && campaign.audience.customerIds) {
+        customerIds = await Customer.find({
+          _id: { $in: campaign.audience.customerIds },
+          businessId: bId,
+          doNotMessage: { $ne: true },
+          waOptIn: { $ne: false },
+        }).distinct('_id');
+      }
+
+      const customers = await Customer.find({
+        _id: { $in: customerIds },
+        businessId: bId,
+        phone: { $exists: true, $ne: '' },
+      }).limit(5000);
+
       let count = 0;
 
       for (const cust of customers) {
         if (!cust.phone) continue;
+
+        // Daily marketing cap guard (max 1 marketing message per customer per day)
+        const dedupeKey = `mkt:${cId}:${cust._id}`;
+        const alreadySent = await AutomationSend.findById(dedupeKey);
+        if (alreadySent) continue;
 
         // Upsert conversation
         let conversation = await WaConversation.findOne({
@@ -151,15 +197,47 @@ export function createCampaignWorker(): Worker {
           });
         }
 
+        // Variable replacement
+        const templateVars: string[] = [];
+        const rawMap = campaign.variableMap || {};
+        const varKeys = Object.keys(rawMap);
+
+        if (varKeys.length > 0) {
+          for (const k of varKeys) {
+            let val = rawMap[k] || '';
+            val = val
+              .replace(/{{customer_name}}/gi, cust.name || 'Valued Customer')
+              .replace(/{{offer_code}}/gi, offer?.code || '')
+              .replace(
+                /{{discount_value}}/gi,
+                offer
+                  ? offer.discountType === 'percentage'
+                    ? `${offer.discountValue / 100}%`
+                    : `₹${(offer.discountValue / 100).toFixed(0)}`
+                  : ''
+              )
+              .replace(/{{expiry_date}}/gi, offer ? offer.validTill.toISOString().split('T')[0] : '');
+            templateVars.push(val);
+          }
+        }
+
         const msg = await WaMessage.create({
           businessId: bId,
           conversationId: conversation._id,
           direction: 'out',
           kind: 'template',
           templateId: campaign.templateId,
+          variables: templateVars.length > 0 ? templateVars : undefined,
           origin: 'campaign',
           originId: campaign._id,
           status: 'queued',
+        });
+
+        await AutomationSend.create({
+          _id: dedupeKey,
+          businessId: bId,
+          messageId: msg._id,
+          at: new Date(),
         });
 
         await whatsappSendQueue().add(

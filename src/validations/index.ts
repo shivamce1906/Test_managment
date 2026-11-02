@@ -12,3 +12,5 @@ export * from './inventory.schema';
 export * from './lead.schema';
 export * from './whatsapp.schema';
 export * from './dayend.schema';
+export * from './marketing.schema';
+

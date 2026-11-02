@@ -7,9 +7,12 @@ export interface ICampaign extends Document {
   name: string;
   numberId: Types.ObjectId;
   templateId: Types.ObjectId;
+  offerId?: Types.ObjectId;
   audience: {
     kind: 'segment' | 'upload' | 'selection';
+    segmentId?: Types.ObjectId;
     segment?: Record<string, any>;
+    segmentCriteria?: Record<string, any>;
     customerIds?: Types.ObjectId[];
     uploadKey?: string;
   };
@@ -24,6 +27,11 @@ export interface ICampaign extends Document {
     read: number;
     failed: number;
     costPaise: number;
+    conversions?: {
+      billsCount: number;
+      revenuePaise: number;
+      discountGivenPaise: number;
+    };
   };
   createdAt: Date;
   updatedAt: Date;
@@ -35,9 +43,12 @@ const campaignSchema = new Schema<ICampaign>(
     name: { type: String, required: true },
     numberId: { type: Schema.Types.ObjectId, ref: 'waNumbers', required: true },
     templateId: { type: Schema.Types.ObjectId, ref: 'waTemplates', required: true },
+    offerId: { type: Schema.Types.ObjectId, ref: 'marketingOffers' },
     audience: {
       kind: { type: String, enum: ['segment', 'upload', 'selection'], required: true },
+      segmentId: { type: Schema.Types.ObjectId, ref: 'marketingSegments' },
       segment: { type: Schema.Types.Mixed },
+      segmentCriteria: { type: Schema.Types.Mixed },
       customerIds: [{ type: Schema.Types.ObjectId, ref: 'customers' }],
       uploadKey: { type: String },
     },
@@ -57,6 +68,11 @@ const campaignSchema = new Schema<ICampaign>(
       read: { type: Number, default: 0, required: true },
       failed: { type: Number, default: 0, required: true },
       costPaise: { type: Number, default: 0, required: true },
+      conversions: {
+        billsCount: { type: Number, default: 0 },
+        revenuePaise: { type: Number, default: 0 },
+        discountGivenPaise: { type: Number, default: 0 },
+      },
     },
   },
   {

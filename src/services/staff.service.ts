@@ -15,6 +15,14 @@ import {
   createAdvanceSchema,
 } from '../validations';
 
+/**
+ * Branch logins see staff as names for the pickers (PRD: staff records "None"):
+ * no salary, commission, statutory, bank, documents or contact details.
+ */
+const BRANCH_STAFF_FIELDS = '_id businessId branchId name designation serviceIds status';
+const staffFieldsFor = (ctx: RequestContext) => (ctx.role === 'branch' ? BRANCH_STAFF_FIELDS : '');
+const staffRefFieldsFor = (ctx: RequestContext) => (ctx.role === 'branch' ? 'name designation' : 'name phone designation');
+
 /** Managers and branch logins only reach staff of their own branches; the owner reaches all. */
 function inBranchScope(ctx: RequestContext, branchId: Types.ObjectId | string) {
   return ctx.role === 'owner' || ctx.branchIds.includes(branchId.toString());
@@ -178,7 +186,7 @@ export async function getStaffList(
     query.$or = [{ name: { $regex: text, $options: 'i' } }, { phone: { $regex: text.replace(/\D/g, '') || text } }];
   }
 
-  return Staff.find(query).sort({ name: 1 });
+  return Staff.find(query).select(staffFieldsFor(ctx)).sort({ name: 1 });
 }
 
 export async function getStaffById(
@@ -189,7 +197,10 @@ export async function getStaffById(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  return findScopedStaff(ctx, staffId);
+  const staff = await findScopedStaff(ctx, staffId);
+  if (ctx.role !== 'branch') return staff;
+  const full: any = staff.toObject();
+  return Object.fromEntries(BRANCH_STAFF_FIELDS.split(' ').map((k) => [k, full[k]]));
 }
 
 export async function getBilledByStaff(
@@ -206,7 +217,7 @@ export async function getBilledByStaff(
     status: 'active',
     designation: 'receptionist',
   })
-    .select('_id name designation phone')
+    .select(ctx.role === 'branch' ? '_id name designation' : '_id name designation phone')
     .sort({ name: 1 });
 }
 
@@ -312,7 +323,7 @@ export async function getAttendance(
     businessId: toObjectId(ctx.businessId),
     branchId: toObjectId(branchId),
     status: 'active',
-  });
+  }).select(staffFieldsFor(ctx));
 
   const records = await Attendance.find({
     businessId: toObjectId(ctx.businessId),
@@ -561,7 +572,7 @@ export async function getLeaves(
   if (filter?.staffId) query.staffId = toObjectId(filter.staffId);
   if (filter?.status) query.status = filter.status;
 
-  return Leave.find(query).populate('staffId', 'name phone designation').sort({ from: -1 });
+  return Leave.find(query).populate('staffId', staffRefFieldsFor(ctx)).sort({ from: -1 });
 }
 
 // ----------------------------------------------------

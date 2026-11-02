@@ -42,7 +42,7 @@ staffRouter.post('/branches/:branchId/leaves', requireBranchAccess, requireRole(
 staffRouter.patch('/leaves/:id/status', requireRole('owner', 'manager'), validate({ params: idParamSchema, body: updateLeaveStatusSchema }), StaffController.updateLeaveStatus);
 
 // 5. Salary Advances
-staffRouter.get('/branches/:branchId/advances', requireBranchAccess, StaffController.getAdvances);
+staffRouter.get('/branches/:branchId/advances', requireBranchAccess, requireRole('owner', 'manager'), StaffController.getAdvances);
 staffRouter.post('/branches/:branchId/advances', requireBranchAccess, requireRole('owner', 'manager'), validate({ body: createAdvanceSchema }), StaffController.createAdvance);
 
 // 6. Active Receptionists for Billed-By

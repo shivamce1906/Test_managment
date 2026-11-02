@@ -169,7 +169,7 @@ export async function getDashboardKPIs(ctx: RequestContext, branchId?: string) {
   const todaySales = sum(todays.map((b) => b.totals.taxablePaise));
   const newCustomers = await Customer.countDocuments({ businessId: s.businessId, 'stats.firstVisit': today, _id: { $in: todays.map((b) => b.customerId) } });
 
-  return {
+  const kpis: any = {
     date: today,
     branchIds: s.branchIds,
     today: {
@@ -200,6 +200,12 @@ export async function getDashboardKPIs(ctx: RequestContext, branchId?: string) {
     openDuesPaise: sum(openDues.map((d) => d.amountPaise - d.settledPaise)),
     unreadWaCount,
   };
+  // PRD: a branch login gets its own day summary, not month-to-date or trends
+  if (ctx.role === 'branch') {
+    delete kpis.mtd;
+    delete kpis.last7Days;
+  }
+  return kpis;
 }
 
 // ----------------------------------------------------

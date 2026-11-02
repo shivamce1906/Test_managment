@@ -16,15 +16,26 @@ import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
 import { assertRefsInBusiness } from './tenant-refs';
 
-/** Managers act only for their assigned branches (owners for all). */
+/** Managers and branch logins act only for their own branches (owners for all). */
+const scoped = (ctx: RequestContext) => ctx.role === 'manager' || ctx.role === 'branch';
+
 function assertManages(ctx: RequestContext, branchId: Types.ObjectId | string, what: string): void {
-  if (ctx.role === 'manager' && !ctx.branchIds.includes(branchId.toString())) {
+  if (scoped(ctx) && !ctx.branchIds.includes(branchId.toString())) {
     throw new AppError(403, ErrorCode.FORBIDDEN, `You do not manage the branch for this ${what}`);
   }
 }
 
 /** Which stock pools a product type can live in. */
 const POOLS_FOR: Record<string, string[]> = { retail: ['retail'], consumable: ['consumable'], both: ['retail', 'consumable'] };
+
+/** The front desk sees quantities, not what the business pays (purchase price, stock value, movement cost). */
+const hidesCost = (ctx: RequestContext) => ctx.role === 'branch';
+
+const withoutVendorBill = (ctx: RequestContext, po: any) => {
+  if (!hidesCost(ctx)) return po;
+  const { vendorBill, ...rest } = po.toObject();
+  return rest;
+};
 
 const unitCost = (product: any) => (product?.purchasePricePaise || 0) / (product?.unitsPerPurchase || 1);
 import { z } from 'zod';
@@ -62,12 +73,17 @@ export async function getStockBalances(
     const product = b.productId;
     const reorder = product?.reorderLevels?.find((r: any) => r.branchId.toString() === branchId.toString());
     const reorderLevel = reorder?.qty ?? null;
-    return {
+    const row: any = {
       ...b.toObject(),
       reorderLevel,
       low: reorderLevel !== null && b.qty <= reorderLevel,
       valuePaise: Math.round(unitCost(product) * Math.max(0, b.qty)),
     };
+    if (hidesCost(ctx)) {
+      delete row.valuePaise;
+      if (row.productId) delete row.productId.purchasePricePaise;
+    }
+    return row;
   });
   return filter?.lowOnly ? rows.filter((r) => r.low) : rows;
 }
@@ -96,7 +112,8 @@ export async function getStockMovements(
   if (filter?.businessDate) query.businessDate = filter.businessDate;
 
   return StockMovement.find(query)
-    .populate('productId')
+    .select(hidesCost(ctx) ? '-costPaise' : '')
+    .populate('productId', hidesCost(ctx) ? '-purchasePricePaise' : '')
     .sort({ createdAt: -1 })
     .skip(filter?.skip || 0)
     .limit(filter?.limit || 50);
@@ -121,6 +138,9 @@ export async function adjustStock(
     throw new AppError(422, ErrorCode.VALIDATION_ERROR, `${product.name} is a ${product.type} product and has no ${input.pool} stock`, {
       fields: { pool: `Use ${POOLS_FOR[product.type].join(' or ')}` },
     });
+  }
+  if (ctx.role === 'branch' && input.type !== 'internal_use') {
+    throw new AppError(403, ErrorCode.FORBIDDEN, 'A branch login can only record internal use; ask a manager for other adjustments');
   }
   if (input.type === 'internal_use' && input.qty > 0) {
     throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Internal use takes stock out: qty must be negative', { fields: { qty: 'Use a negative quantity' } });
@@ -171,7 +191,9 @@ export async function adjustStock(
       meta: { pool: input.pool, qtyDelta: input.qty, newQty: balance.qty, reason: input.reason },
     });
 
-    return { balance, movement: movement[0] };
+    const out: any = movement[0].toObject();
+    if (hidesCost(ctx)) delete out.costPaise;
+    return { balance, movement: out };
   });
 }
 
@@ -251,7 +273,7 @@ export async function createPurchaseOrder(
       after: po[0].toObject(),
     });
 
-    return po[0];
+    return withoutVendorBill(ctx, po[0]);
   });
 }
 
@@ -452,7 +474,7 @@ export async function receivePurchaseOrder(
       meta: { status: po.status, itemsCount: input.items.length },
     });
 
-    return po;
+    return withoutVendorBill(ctx, po);
   });
 }
 
@@ -511,13 +533,14 @@ export async function getPurchaseOrders(
   if (filter.branchId) {
     assertManages(ctx, filter.branchId, 'purchase order');
     query.branchId = toObjectId(filter.branchId);
-  } else if (ctx.role === 'manager') {
+  } else if (scoped(ctx)) {
     query.branchId = { $in: ctx.branchIds.map(toObjectId) };
   }
   if (filter.status) query.status = filter.status;
   if (filter.vendorId) query.vendorId = toObjectId(filter.vendorId);
 
   return PurchaseOrder.find(query)
+    .select(hidesCost(ctx) ? '-vendorBill' : '')
     .populate('vendorId', 'name contact phone')
     .populate('branchId', 'name code')
     .sort({ createdAt: -1 });
@@ -526,6 +549,7 @@ export async function getPurchaseOrders(
 export async function getPurchaseOrderById(ctx: RequestContext, poId: string) {
   const businessId = toObjectId(ctx.businessId!);
   const po = await PurchaseOrder.findOne({ _id: toObjectId(poId), businessId })
+    .select(hidesCost(ctx) ? '-vendorBill' : '')
     .populate('vendorId', 'name contact phone gstin')
     .populate('branchId', 'name code')
     .populate('items.productId', 'name brand type purchaseUnit useUnit unitsPerPurchase');
@@ -551,6 +575,10 @@ export async function createTransfer(
   await assertRefsInBusiness(Branch, businessId, [input.fromBranchId, input.toBranchId], 'branches');
   if (ctx.role === 'manager' && !ctx.branchIds.includes(input.fromBranchId) && !ctx.branchIds.includes(input.toBranchId)) {
     throw new AppError(403, ErrorCode.FORBIDDEN, 'You manage neither branch of this transfer');
+  }
+  // A branch login requests stock for its own branch; the sending branch approves and dispatches
+  if (ctx.role === 'branch' && !ctx.branchIds.includes(input.toBranchId)) {
+    throw new AppError(403, ErrorCode.FORBIDDEN, 'A branch login can only request stock for its own branch');
   }
   const products = await Product.find({ businessId, _id: { $in: input.items.map((i) => toObjectId(i.productId)) } });
   for (const it of input.items) {
@@ -864,7 +892,7 @@ export async function getTransfers(
     const bId = toObjectId(filter.branchId);
     query.$or = [{ fromBranchId: bId }, { toBranchId: bId }];
   }
-  if (ctx.role === 'manager') {
+  if (scoped(ctx)) {
     const mine = ctx.branchIds.map(toObjectId);
     query.$and = [{ $or: [{ fromBranchId: { $in: mine } }, { toBranchId: { $in: mine } }] }];
   }

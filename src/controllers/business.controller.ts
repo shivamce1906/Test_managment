@@ -29,6 +29,14 @@ export class BusinessController {
     }
   }
 
+  public static async getBranchDirectory(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      res.json(await businessService.getBranchDirectory(req.ctx));
+    } catch (err) {
+      next(err);
+    }
+  }
+
   public static async updateBranch(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const result = await businessService.updateBranch(req.ctx, req.params.branchId, req.body);

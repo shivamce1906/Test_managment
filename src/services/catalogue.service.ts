@@ -596,7 +596,8 @@ export class CatalogueService {
     if (filters.active !== undefined) {
       query.active = filters.active;
     }
-    return Product.find(query).sort({ name: 1 });
+    // The front desk sees selling prices only (purchase price stays with owner and managers)
+    return Product.find(query).select(ctx.role === 'branch' ? '-purchasePricePaise' : '').sort({ name: 1 });
   }
 
   // --- VENDORS ---

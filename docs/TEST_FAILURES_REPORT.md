@@ -617,3 +617,7 @@ Also: a **platform (Super Admin) token on tenant routes** hits this and returns 
 ## Progress — manager flags (2026-10-31)
 
 Six owner-granted manager flags added (`manageCatalogue`, `manageCustomers`, `manageFinance`, `managePayroll`, `exportAudit`, `manageMarketing`). Full suite: **716 tests · 670 passed · 46 failed**. The two fixed are the leads-whatsapp checks that managers can only view campaigns. The remaining failures are unchanged: leads-whatsapp, workers, reports-system, auth.
+
+## Progress — branch login panel (2026-11-01)
+
+Branch login aligned with the PRD matrix (docs/BRANCH_API_GUIDE.md): slim staff records (salary/bank leak fixed), POs raise + receive, transfers request + receive, internal use and stock counts, no cost prices, today-only dashboard, new `GET /business/branches/directory`. New tests/integration/branch.test.ts (10). Full suite: **726 tests · 680 passed · 46 failed**. The remaining failures are unchanged (leads-whatsapp, workers, reports-system, auth).

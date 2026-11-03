@@ -14,18 +14,28 @@ import {
   processInboundWebhook,
   markChatRead,
   saveChatNote,
+  findWaNumberForWebhook,
+  webhookSecretMatches,
 } from '../services';
 
 export class WhatsappController {
   public static async processWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const identifier = req.params.uid || req.params.numberId;
-      const sig = (req.headers['x-instantbroadcast-signature'] || req.headers['x-aisensy-signature']) as string | undefined;
-      if (sig === 'forged') {
+      const waNum = await findWaNumberForWebhook(identifier);
+      // Unknown numbers get a quick 200 so the provider stops retrying; nothing is stored
+      if (!waNum) {
+        res.json({ success: true });
+        return;
+      }
+      const provided =
+        (typeof req.query.secret === 'string' ? req.query.secret : undefined) ||
+        ((req.headers['x-webhook-secret'] || req.headers['x-instantbroadcast-signature'] || req.headers['x-aisensy-signature']) as string | undefined);
+      if (!webhookSecretMatches(waNum, provided)) {
         res.status(401).json({ error: { code: 'INVALID_SIGNATURE', message: 'Invalid webhook signature' } });
         return;
       }
-      await processInboundWebhook(identifier, req.body);
+      await processInboundWebhook(waNum._id, req.body);
       res.json({ success: true });
     } catch (err) {
       next(err);
@@ -61,9 +71,11 @@ export class WhatsappController {
 
   public static async getConversations(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const branchId = req.query.branchId as string;
-      const status = req.query.status as any;
-      const result = await getConversations(req.ctx, branchId, status);
+      const branchId = req.query.branchId as string | undefined;
+      const result = await getConversations(req.ctx, branchId || undefined, {
+        unreadOnly: req.query.unreadOnly === 'true',
+        search: typeof req.query.search === 'string' && req.query.search.trim() ? req.query.search : undefined,
+      });
       res.json(result);
     } catch (err) {
       next(err);
@@ -86,7 +98,9 @@ export class WhatsappController {
         res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'conversationId is required' } });
         return;
       }
-      const result = await getMessages(req.ctx, conversationId);
+      const limit = Number(req.query.limit) || 50;
+      const skip = Math.max(0, Number(req.query.skip) || 0);
+      const result = await getMessages(req.ctx, conversationId, limit, skip);
       res.json(result);
     } catch (err) {
       next(err);

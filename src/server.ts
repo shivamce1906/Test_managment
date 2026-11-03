@@ -37,6 +37,15 @@ async function bootstrap() {
         logger.warn({ err: socketErr }, 'Notice: WebSocket server failed to initialize');
       }
 
+      // Reopen every business's live WhatsApp connection (they were lost on each restart)
+      try {
+        const { reconnectAllWaNumbers } = await import('./services/whatsapp.service');
+        const count = await reconnectAllWaNumbers();
+        logger.info({ count }, 'WhatsApp numbers reconnected to Instant Broadcast');
+      } catch (waErr) {
+        logger.warn({ err: waErr }, 'Notice: WhatsApp numbers could not be reconnected');
+      }
+
       // Auto-start background workers (Point 4: Process PDF, WhatsApp & Day-End queues automatically)
       if (process.env.RUN_STANDALONE_WORKER !== 'true') {
         try {

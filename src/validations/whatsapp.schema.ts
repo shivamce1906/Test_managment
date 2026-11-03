@@ -7,7 +7,7 @@ export const configureWaNumberSchema = z.object({
   userToken: z.string().optional(),
   apiKey: z.string().optional(),
   projectId: z.string().optional(),
-  webhookSecret: z.string().optional().default('default-webhook-secret'),
+  webhookSecret: z.string().min(16, 'Use at least 16 characters').optional(),
   branchIds: z.array(objectIdSchema).optional(),
 });
 

@@ -1,13 +1,28 @@
 import { io, Socket } from 'socket.io-client';
 import { logger } from '../../utils';
 import { env } from '../../config';
-import { emitToBusiness } from '../../socket';
+import { emitToBranch, emitToOwners } from '../../socket';
 
 export interface InstantBroadcastSocketConfig {
   uid: string;
   userToken: string;
   businessId: string;
   numberId: string;
+}
+
+/**
+ * Relays a provider event about one chat to that chat's branch (plus owners).
+ * Events we can't tie to a stored conversation go to owners only, never to every branch.
+ */
+async function emitForChat(config: InstantBroadcastSocketConfig, chatId: string | undefined, event: string, payload: any) {
+  if (chatId) {
+    const { WaConversation } = await import('../../models');
+    const conv = await WaConversation.findOne({ businessId: config.businessId, providerChatId: chatId })
+      .select('branchId')
+      .setOptions({ skipTenantScope: true });
+    if (conv) return emitToBranch(config.businessId, conv.branchId.toString(), event, payload);
+  }
+  emitToOwners(config.businessId, event, payload);
 }
 
 class InstantBroadcastSocketManager {
@@ -88,7 +103,7 @@ class InstantBroadcastSocketManager {
         }
 
         // Notify local frontend management clients
-        emitToBusiness(config.businessId, 'wa:conversation_update', {
+        await emitForChat(config, chatId, 'wa:conversation_update', {
           chatId,
           data,
           numberId: config.numberId,
@@ -101,7 +116,7 @@ class InstantBroadcastSocketManager {
     // 3. Conversations Ordering & Unread Sync (Server -> Client)
     socket.on('update_chat_list', (data: any) => {
       logger.debug({ uid: config.uid }, 'Instant Broadcast: update_chat_list received');
-      emitToBusiness(config.businessId, 'wa:chat_list_update', {
+      emitToOwners(config.businessId, 'wa:chat_list_update', {
         numberId: config.numberId,
         data,
       });
@@ -109,8 +124,8 @@ class InstantBroadcastSocketManager {
 
     // 4. Inbound Message Chime Alert (Server -> Client)
     socket.on('ring', (data: any) => {
-      logger.info({ uid: config.uid, data }, 'Instant Broadcast: incoming message chime (ring) received');
-      emitToBusiness(config.businessId, 'wa:ring', {
+      logger.info({ uid: config.uid, chatId: data?.chatId }, 'Instant Broadcast: incoming message chime (ring) received');
+      void emitForChat(config, data?.chatId, 'wa:ring', {
         numberId: config.numberId,
         data,
       });
@@ -127,7 +142,7 @@ class InstantBroadcastSocketManager {
             profilePicUrl: data.profilePic || data.profilePicUrl,
           });
         }
-        emitToBusiness(config.businessId, 'wa:chat_info_update', data);
+        await emitForChat(config, data?.chatId, 'wa:chat_info_update', data);
       } catch (err: any) {
         logger.warn({ err: err.message }, 'Failed to update contact info from update_chat_info');
       }

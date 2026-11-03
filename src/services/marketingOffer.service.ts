@@ -28,6 +28,15 @@ export interface ValidateOfferResult {
   reason?: string;
 }
 
+/** Percentage offers are in basis points: 2500 = 25 %, at most 10000 = 100 %. */
+function assertPercentInRange(type: string | undefined, value: number | undefined) {
+  if (type === 'percentage' && value !== undefined && value > 10000) {
+    throw new AppError(400, ErrorCode.VALIDATION_ERROR, 'Validation failed', {
+      fields: { discountValue: 'Percentage is in basis points (2500 = 25 %); at most 10000' },
+    });
+  }
+}
+
 export class MarketingOfferService {
   async createOffer(ctx: RequestContext, input: any): Promise<IMarketingOffer> {
     if (!ctx.businessId) {
@@ -35,6 +44,7 @@ export class MarketingOfferService {
     }
     const businessId = toObjectId(ctx.businessId);
 
+    assertPercentInRange(input.discountType, input.discountValue);
     const code = input.code.trim().toUpperCase();
     const existing = await MarketingOffer.findOne({ businessId, code });
     if (existing) {
@@ -119,6 +129,7 @@ export class MarketingOfferService {
     if (!offer) {
       throw new AppError(404, ErrorCode.NOT_FOUND, 'Offer not found');
     }
+    assertPercentInRange(input.discountType ?? offer.discountType, input.discountValue ?? offer.discountValue);
 
     if (input.code) {
       const code = input.code.trim().toUpperCase();

@@ -39,6 +39,7 @@ import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
 import { notificationService } from './notification.service';
 import { computeBill, ComputeBillInput, ComputeLineItem } from './billing.compute';
+import { marketingOfferService } from './marketingOffer.service';
 import { pdfService } from '../integrations';
 
 /** Statuses whose effects (stock, wallet, dues, stats, summary) have been applied. */
@@ -153,6 +154,7 @@ export class BillingService {
       collectDuesPaise: prepared.collectTotalPaise,
       needsApproval: prepared.approvalReasons.length > 0 && ctx.role !== 'owner',
       approvalReasons: prepared.approvalReasons,
+      offer: prepared.offer ? { ...prepared.offer, discountPaise: prepared.computed.totals.offerDiscountPaise } : null,
     };
   }
 
@@ -327,6 +329,7 @@ export class BillingService {
     collectTotalPaise: number;
     computed: ReturnType<typeof computeBill>;
     approvalReasons: ('discount_over_limit' | 'partly_paid')[];
+    offer: { offerId?: Types.ObjectId; code: string; campaignId?: Types.ObjectId; title?: string } | null;
   }> {
     const businessId = toObjectId(business._id);
     const inputLines = await this.resolveInputLines(businessId, branchId, draft.lines, session);
@@ -459,6 +462,8 @@ export class BillingService {
       throw new AppError(422, 'INSUFFICIENT_WALLET', 'Insufficient wallet balance');
     }
 
+    const { offer, offerDiscountPaise } = await this.resolveOffer(ctx, businessId, branchId, customer, inputLines, draft, session);
+
     const computed = computeBill({
       lines: inputLines,
       billDiscount: draft.billDiscount,
@@ -467,6 +472,7 @@ export class BillingService {
       payments,
       gstApplied: business.gst.enabled,
       businessGstBps: business.gst.rateBps || 1800,
+      offerDiscountPaise,
     });
 
     // Payments cover the bill (total + tips) and any dues collected with it; never more
@@ -488,9 +494,59 @@ export class BillingService {
 
     const approvalReasons: ('discount_over_limit' | 'partly_paid')[] = [];
     if (computed.totals.duePaise > 0) approvalReasons.push('partly_paid');
+    // An owner-made offer is pre-approved: it never counts towards the user's discount limit
     if (this.checkDiscountLimit(ctx, business, draft, computed)) approvalReasons.push('discount_over_limit');
 
-    return { inputLines, redemptions, tips, collectDues, collectTotalPaise, computed, approvalReasons };
+    return { inputLines, redemptions, tips, collectDues, collectTotalPaise, computed, approvalReasons, offer };
+  }
+
+  /**
+   * Re-validates a marketing offer code on the server and returns the discount to apply.
+   * The client's discountPaise is never trusted. An edited bill keeps the offer it was saved with.
+   */
+  private async resolveOffer(
+    ctx: RequestContext,
+    businessId: Types.ObjectId,
+    branchId: Types.ObjectId,
+    customer: any,
+    inputLines: ComputeLineItem[],
+    draft: any,
+    session?: ClientSession
+  ): Promise<{ offer: any; offerDiscountPaise: number }> {
+    const mo = draft.marketingOffer;
+    if (mo?.kept) return { offer: mo.kept, offerDiscountPaise: mo.kept.discountPaise || 0 };
+    if (!mo || (!mo.code && !mo.offerId)) return { offer: null, offerDiscountPaise: 0 };
+    if (!customer?._id) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'Choose the customer before applying an offer code', {
+        fields: { customerId: 'Required for offers' },
+      });
+    }
+
+    let code = mo.code as string | undefined;
+    if (!code) {
+      const byId = await MarketingOffer.findOne({ _id: toObjectId(mo.offerId), businessId }).session(session || null);
+      if (!byId) throw new AppError(404, 'NOT_FOUND', 'Offer not found');
+      code = byId.code;
+    }
+    let campaignId: Types.ObjectId | undefined;
+    if (mo.campaignId) {
+      if (!(await Campaign.exists({ _id: toObjectId(mo.campaignId), businessId }).session(session || null))) {
+        throw new AppError(404, 'NOT_FOUND', 'Campaign not found');
+      }
+      campaignId = toObjectId(mo.campaignId);
+    }
+
+    const eligibleGross = sum(inputLines.filter((l) => l.kind === 'service' || l.kind === 'product').map((l) => l.unitPricePaise * l.qty));
+    const v = await marketingOfferService.validateOfferForCustomer(ctx, {
+      code,
+      customerId: customer._id.toString(),
+      branchId: branchId.toString(),
+      grossPaise: eligibleGross,
+    });
+    return {
+      offer: { offerId: toObjectId(v.offerId), code: v.code, title: v.title, campaignId },
+      offerDiscountPaise: v.discountPaise,
+    };
   }
 
   /**
@@ -631,39 +687,18 @@ export class BillingService {
       approval: status === 'awaiting_approval' ? { reasons: approvalReasons, requestedAt: new Date(), requestedBy: toObjectId(ctx.userId) } : undefined,
       version: 1,
       refunds: [],
-      marketingOffer: draft.marketingOffer
+      marketingOffer: prepared.offer
         ? {
-            offerId: draft.marketingOffer.offerId ? toObjectId(draft.marketingOffer.offerId) : undefined,
-            code: draft.marketingOffer.code,
-            campaignId: draft.marketingOffer.campaignId ? toObjectId(draft.marketingOffer.campaignId) : undefined,
-            discountPaise: draft.marketingOffer.discountPaise || 0,
+            offerId: prepared.offer.offerId,
+            code: prepared.offer.code,
+            campaignId: prepared.offer.campaignId,
+            discountPaise: computed.totals.offerDiscountPaise,
           }
         : undefined,
       idempotencyKey: key,
     });
 
     await bill.save({ session });
-
-    if (draft.marketingOffer?.offerId) {
-      await MarketingOffer.findOneAndUpdate(
-        { _id: toObjectId(draft.marketingOffer.offerId), businessId },
-        { $inc: { totalUsedCount: 1 } },
-        { session }
-      );
-    }
-    if (draft.marketingOffer?.campaignId) {
-      await Campaign.findOneAndUpdate(
-        { _id: toObjectId(draft.marketingOffer.campaignId), businessId },
-        {
-          $inc: {
-            'stats.conversions.billsCount': 1,
-            'stats.conversions.revenuePaise': bill.totals.taxablePaise,
-            'stats.conversions.discountGivenPaise': bill.totals.discountPaise,
-          },
-        },
-        { session }
-      );
-    }
 
     // Effects apply now for a paid/partly paid bill, or later when an approver approves it
     if (status === 'paid' || status === 'partly_paid') {
@@ -715,6 +750,26 @@ export class BillingService {
   /**
    * Applies all financial, stock, customer, and summary effects when a bill is paid.
    */
+  /** Adds (+1) or takes back (-1) a bill's offer use and its campaign conversion. */
+  private async countOfferUse(businessId: Types.ObjectId, bill: IBill, sign: 1 | -1, session?: ClientSession): Promise<void> {
+    const mo: any = (bill as any).marketingOffer;
+    if (!mo?.offerId) return;
+    await MarketingOffer.updateOne({ _id: mo.offerId, businessId }, { $inc: { totalUsedCount: sign } }, { session });
+    if (mo.campaignId) {
+      await Campaign.updateOne(
+        { _id: mo.campaignId, businessId },
+        {
+          $inc: {
+            'stats.conversions.billsCount': sign,
+            'stats.conversions.revenuePaise': sign * bill.totals.taxablePaise,
+            'stats.conversions.discountGivenPaise': sign * (mo.discountPaise || 0),
+          },
+        },
+        { session }
+      );
+    }
+  }
+
   async applyBillEffects(
     businessId: Types.ObjectId,
     branchId: Types.ObjectId,
@@ -727,6 +782,9 @@ export class BillingService {
     const businessDate = bill.businessDate;
     const actorId = userId || bill.billedByStaffId || businessId;
     const business = await Business.findById(businessId).select('loyalty').session(session || null);
+
+    // 0. Offer use and campaign conversion count only once the bill takes effect (paid or approved)
+    await this.countOfferUse(businessId, bill, 1, session);
 
     // 1. Consume package sessions (re-checked here: two bills racing for the last session conflict
     // on this document, the transaction retries, and the loser gets NO_SESSIONS_LEFT)
@@ -1134,6 +1192,7 @@ export class BillingService {
     opts: { reason: string; countAsCancel: boolean; actorId: Types.ObjectId }
   ): Promise<void> {
     const branchId = bill.branchId;
+    await this.countOfferUse(businessId, bill, -1, session);
 
     // Plans sold on this bill: unused ones are cancelled; a used one blocks the reversal
     const soldPlans = await CustomerPlan.find({ businessId, soldBillId: bill._id, status: { $ne: 'cancelled' } }).session(session);
@@ -1495,6 +1554,7 @@ export class BillingService {
         redemptions: updates.redemptions || [],
         tips: updates.tips ?? bill.tips.map((t) => ({ staffId: t.staffId, amountPaise: t.amountPaise, payout: t.payout })),
         payments: paymentsUntouched ? bill.payments.map((p) => ({ mode: p.mode, amountPaise: p.amountPaise })) : updates.payments,
+        marketingOffer: (bill as any).marketingOffer?.offerId ? { kept: (bill as any).marketingOffer.toObject?.() ?? (bill as any).marketingOffer } : undefined,
       };
       const prepared = await this.prepareDraft(ctx, business, bill.branchId, customer, draft, session, { allowOverpay: paymentsUntouched });
 
@@ -1504,6 +1564,7 @@ export class BillingService {
 
       bill.lines = prepared.computed.lines as any;
       bill.billDiscount = draft.billDiscount;
+      if ((bill as any).marketingOffer?.offerId) (bill as any).marketingOffer.discountPaise = prepared.computed.totals.offerDiscountPaise;
       bill.redemptions = prepared.redemptions as any;
       bill.totals = prepared.computed.totals;
       bill.tips = prepared.tips as any;

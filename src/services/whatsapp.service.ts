@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Types } from 'mongoose';
 import {
   WaNumber,
@@ -18,7 +19,7 @@ import {
   AutomationSend,
   withTransaction,
 } from '../models';
-import { AppError, ErrorCode, normalizePhone, encrypt, decrypt } from '../utils';
+import { AppError, ErrorCode, normalizePhone, encrypt, decrypt, logger } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
 import {
@@ -27,7 +28,7 @@ import {
   instantBroadcastSocket,
   getRedisClient,
 } from '../integrations';
-import { emitToBusiness } from '../socket';
+import { emitToBranch } from '../socket';
 import { whatsappSendQueue } from '../workers/queues';
 import { z } from 'zod';
 import {
@@ -59,7 +60,34 @@ export async function configureWaNumber(
   const rawToken = input.userToken || input.apiKey || '';
   const uid = input.uid || input.projectId || '';
   const tokenEnc = encrypt(rawToken);
-  const webhookSecretEnc = encrypt(input.webhookSecret || 'secret');
+
+  // One WhatsApp account belongs to one business: webhooks are routed by uid, so a shared uid would mix salons
+  const clash = await WaNumber.findOne({
+    businessId: { $ne: businessId },
+    $or: [
+      { phone },
+      ...(uid ? [{ 'instantBroadcast.uid': uid }, { 'aisensy.projectId': uid }] : []),
+    ],
+  }).setOptions({ skipTenantScope: true });
+  if (clash) {
+    throw new AppError(409, ErrorCode.ALREADY_EXISTS, 'This WhatsApp account is already connected to another business', {
+      fields: clash.phone === phone ? { phone: 'Already used by another business' } : { uid: 'Already used by another business' },
+    });
+  }
+
+  // Keep the current webhook secret unless a new one is given; generate one for new numbers and weak old ones
+  const existing = await WaNumber.findOne({ businessId, phone }).setOptions({ skipTenantScope: true });
+  let currentSecret: string | undefined;
+  try {
+    const enc = existing?.instantBroadcast?.webhookSecretEnc || existing?.aisensy?.webhookSecretEnc;
+    currentSecret = enc ? decrypt(enc) : undefined;
+  } catch {
+    currentSecret = undefined;
+  }
+  const webhookSecret =
+    input.webhookSecret ||
+    (currentSecret && !WEAK_WEBHOOK_SECRETS.includes(currentSecret) ? currentSecret : crypto.randomBytes(24).toString('hex'));
+  const webhookSecretEnc = encrypt(webhookSecret);
 
   const waNum = await WaNumber.findOneAndUpdate(
     { businessId, phone },
@@ -88,7 +116,7 @@ export async function configureWaNumber(
   );
 
   await logAction({
-    businessId: ctx.businessId,
+    businessId,
     branchId: ctx.branchId,
     actorId: ctx.userId,
     actorRole: ctx.role,
@@ -110,10 +138,11 @@ export async function configureWaNumber(
     } catch { }
   }
 
-  // Automatically fetch & sync templates
-  await syncWaTemplates(ctx, waNum._id);
+  // Automatically fetch & sync templates (a Super Admin call carries the target business, not its own)
+  await syncWaTemplates({ ...ctx, businessId: businessId.toString() }, waNum._id);
 
-  return waNum;
+  // Shown to the Super Admin so they can paste it into the provider's webhook settings
+  return { ...waNum.toObject(), webhookUrl: `/webhooks/instantbroadcast/${uid || waNum._id}?secret=${webhookSecret}` };
 }
 
 export async function getWaNumbers(ctx: RequestContext) {
@@ -200,6 +229,22 @@ export async function getWaTemplates(
 // Conversations & Messages
 // ----------------------------------------------------
 
+/** Managers and branch logins work only in their own branches' chats; owners in all. */
+const inChatScope = (ctx: RequestContext, branchId: Types.ObjectId | string) =>
+  ctx.role === 'owner' || ctx.branchIds.includes(branchId.toString());
+
+/** Loads a conversation of the business; one outside the user's branches is reported as not found. */
+async function findScopedConversation(ctx: RequestContext, conversationId: string | Types.ObjectId) {
+  if (!Types.ObjectId.isValid(conversationId.toString())) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Conversation not found');
+  }
+  const conv = await WaConversation.findOne({ _id: conversationId, businessId: ctx.businessId });
+  if (!conv || !inChatScope(ctx, conv.branchId)) {
+    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Conversation not found');
+  }
+  return conv;
+}
+
 export async function getConversations(
   ctx: RequestContext,
   branchId?: string | Types.ObjectId,
@@ -211,18 +256,24 @@ export async function getConversations(
 
   const query: any = { businessId: ctx.businessId };
   if (branchId) {
-    query.branchId = branchId;
-  } else if (ctx.role === 'manager' || ctx.role === 'branch') {
-    if (ctx.branchId) {
-      query.branchId = ctx.branchId;
-    } else if (ctx.branchIds && ctx.branchIds.length > 0) {
-      query.branchId = { $in: ctx.branchIds.map(toObjectId) };
+    if (!inChatScope(ctx, branchId)) {
+      throw new AppError(403, ErrorCode.FORBIDDEN, 'You do not have access to this branch');
     }
+    query.branchId = toObjectId(branchId);
+  } else if (ctx.role !== 'owner') {
+    query.branchId = { $in: ctx.branchIds.map(toObjectId) };
   }
 
   if (filter?.unreadOnly) query.unread = { $gt: 0 };
   if (filter?.search) {
-    query.phone = { $regex: filter.search, $options: 'i' };
+    const text = filter.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const digits = text.replace(/\D/g, '');
+    const named = await Customer.find({ businessId: ctx.businessId, name: { $regex: text, $options: 'i' } }).select('_id').limit(200);
+    query.$or = [
+      { 'contactMeta.pushName': { $regex: text, $options: 'i' } },
+      { customerId: { $in: named.map((c) => c._id) } },
+      ...(digits ? [{ phone: { $regex: digits } }] : []),
+    ];
   }
 
   return WaConversation.find(query)
@@ -239,15 +290,10 @@ export async function getConversationById(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const conv = await WaConversation.findOne({ _id: conversationId, businessId: ctx.businessId })
-    .populate('customerId')
+  const scoped = await findScopedConversation(ctx, conversationId);
+  return WaConversation.findOne({ _id: scoped._id, businessId: ctx.businessId })
+    .populate('customerId', 'name phone email stats tags walletBalancePaise loyaltyPoints duePaise')
     .populate('leadId');
-
-  if (!conv) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Conversation not found');
-  }
-
-  return conv;
 }
 
 export async function getMessages(
@@ -260,19 +306,14 @@ export async function getMessages(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  // Clear unread count on reading
-  await WaConversation.findOneAndUpdate(
-    { _id: conversationId, businessId: ctx.businessId },
-    { $set: { unread: 0 } }
-  );
+  const conv = await findScopedConversation(ctx, conversationId);
 
-  return WaMessage.find({
-    businessId: ctx.businessId,
-    conversationId,
-  })
-    .sort({ createdAt: -1 })
+  // Newest page first (skip = how many newer messages to pass), returned oldest → newest for display
+  const page = await WaMessage.find({ businessId: ctx.businessId, conversationId: conv._id })
+    .sort({ createdAt: -1, _id: -1 })
     .skip(skip)
-    .limit(limit);
+    .limit(Math.min(Math.max(limit, 1), 200));
+  return page.reverse();
 }
 
 export async function sendMessage(
@@ -284,10 +325,7 @@ export async function sendMessage(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const conv = await WaConversation.findOne({ _id: conversationId, businessId: ctx.businessId });
-  if (!conv) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Conversation not found');
-  }
+  const conv = await findScopedConversation(ctx, conversationId);
 
   // 24-hour window check for free-form text
   if (input.text && !input.templateId) {
@@ -353,7 +391,7 @@ export async function sendMessage(
   await conv.save();
 
   // Notify frontend clients via socket
-  emitToBusiness(ctx.businessId.toString(), 'wa:new_message', {
+  emitToBranch(ctx.businessId.toString(), conv.branchId.toString(), 'wa:new_message', {
     conversationId: conv._id,
     message,
   });
@@ -377,15 +415,9 @@ export async function markChatRead(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const conv = await WaConversation.findOneAndUpdate(
-    { _id: conversationId, businessId: ctx.businessId },
-    { $set: { unread: 0 } },
-    { new: true }
-  );
-
-  if (!conv) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Conversation not found');
-  }
+  const conv = await findScopedConversation(ctx, conversationId);
+  conv.unread = 0;
+  await conv.save();
 
   // Emit to Instant Broadcast socket engine if providerChatId exists
   if (conv.providerChatId) {
@@ -396,7 +428,7 @@ export async function markChatRead(
     }
   }
 
-  emitToBusiness(ctx.businessId.toString(), 'wa:chat_read', { conversationId: conv._id });
+  emitToBranch(ctx.businessId.toString(), conv.branchId.toString(), 'wa:chat_read', { conversationId: conv._id });
   return conv;
 }
 
@@ -409,8 +441,9 @@ export async function saveChatNote(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const conv = await WaConversation.findOneAndUpdate(
-    { _id: conversationId, businessId: ctx.businessId },
+  const scoped = await findScopedConversation(ctx, conversationId);
+  const conv = (await WaConversation.findOneAndUpdate(
+    { _id: scoped._id, businessId: ctx.businessId },
     {
       $push: {
         notes: {
@@ -421,11 +454,7 @@ export async function saveChatNote(
       },
     },
     { new: true }
-  );
-
-  if (!conv) {
-    throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'Conversation not found');
-  }
+  ))!;
 
   if (conv.providerChatId) {
     const waNum = await WaNumber.findOne({ _id: conv.numberId, businessId: ctx.businessId });
@@ -435,9 +464,9 @@ export async function saveChatNote(
     }
   }
 
-  emitToBusiness(ctx.businessId.toString(), 'wa:chat_note_saved', {
+  emitToBranch(ctx.businessId.toString(), conv.branchId.toString(), 'wa:chat_note_saved', {
     conversationId: conv._id,
-    note,
+    note: conv.notes?.[conv.notes.length - 1],
   });
 
   return conv;
@@ -459,6 +488,75 @@ export async function updateConversationContactMeta(
 // Webhook Processing
 // ----------------------------------------------------
 
+/** The WhatsApp number a webhook URL points at: by our id, the Instant Broadcast uid or the AiSensy project. */
+export async function findWaNumberForWebhook(identifier: string | Types.ObjectId) {
+  let waNum = null;
+  if (Types.ObjectId.isValid(identifier)) {
+    waNum = await WaNumber.findById(identifier).setOptions({ skipTenantScope: true });
+  }
+  if (!waNum) {
+    const matches = await WaNumber.find({
+      $or: [
+        { 'instantBroadcast.uid': String(identifier) },
+        { 'aisensy.projectId': String(identifier) },
+      ],
+    })
+      .limit(2)
+      .setOptions({ skipTenantScope: true });
+    // Saved before the one-business-per-account check: refuse rather than guess which salon gets the message
+    if (matches.length > 1) {
+      logger.error({ identifier }, 'Webhook uid is connected to more than one business; message dropped');
+      return null;
+    }
+    waNum = matches[0] || null;
+  }
+  return waNum;
+}
+
+/**
+ * Reopens the live Instant Broadcast connection for every active number of every business.
+ * Called once at server start; connections were only opened when a number was saved, so a restart dropped them.
+ */
+export async function reconnectAllWaNumbers(): Promise<number> {
+  const numbers = await WaNumber.find({ status: 'active', 'instantBroadcast.uid': { $exists: true, $ne: '' } })
+    .setOptions({ skipTenantScope: true });
+  let connected = 0;
+  for (const n of numbers) {
+    try {
+      const token = n.instantBroadcast?.userTokenEnc ? decrypt(n.instantBroadcast.userTokenEnc) : '';
+      if (!token) continue;
+      instantBroadcastSocket.connectAccount({
+        uid: n.instantBroadcast!.uid,
+        userToken: token,
+        businessId: n.businessId.toString(),
+        numberId: n._id.toString(),
+      });
+      connected++;
+    } catch (err: any) {
+      logger.warn({ err: err.message, numberId: n._id }, 'Could not reconnect WhatsApp number');
+    }
+  }
+  return connected;
+}
+
+/** Constant-time check of the secret sent with a webhook against the number's stored secret. */
+export function webhookSecretMatches(waNum: any, provided: string | undefined): boolean {
+  const enc = waNum?.instantBroadcast?.webhookSecretEnc || waNum?.aisensy?.webhookSecretEnc;
+  if (!enc || !provided) return false;
+  let expected: string;
+  try {
+    expected = decrypt(enc);
+  } catch {
+    return false;
+  }
+  const a = Buffer.from(expected);
+  const b = Buffer.from(provided);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/** Old builds stored these placeholders as the secret; they are replaced on the next save. */
+const WEAK_WEBHOOK_SECRETS = ['secret', 'default-webhook-secret'];
+
 export async function processInboundWebhook(
   numberId: string | Types.ObjectId,
   payload: {
@@ -471,18 +569,7 @@ export async function processInboundWebhook(
     providerChatId?: string;
   }
 ) {
-  let waNum = null;
-  if (Types.ObjectId.isValid(numberId)) {
-    waNum = await WaNumber.findById(numberId).setOptions({ skipTenantScope: true });
-  }
-  if (!waNum) {
-    waNum = await WaNumber.findOne({
-      $or: [
-        { 'instantBroadcast.uid': numberId },
-        { 'aisensy.projectId': numberId },
-      ],
-    }).setOptions({ skipTenantScope: true });
-  }
+  const waNum = await findWaNumberForWebhook(numberId);
   if (!waNum) return;
 
   const phone = normalizePhone(payload.from);
@@ -495,10 +582,15 @@ export async function processInboundWebhook(
       { new: true }
     );
     if (updated) {
-      emitToBusiness(waNum.businessId.toString(), 'wa:message_status', {
-        providerMessageId: payload.providerMessageId,
-        status: payload.status,
-      });
+      const statusConv = await WaConversation.findOne({ _id: updated.conversationId, businessId: waNum.businessId }).select('branchId');
+      if (statusConv) {
+        emitToBranch(waNum.businessId.toString(), statusConv.branchId.toString(), 'wa:message_status', {
+          conversationId: updated.conversationId,
+          messageId: updated._id,
+          providerMessageId: payload.providerMessageId,
+          status: payload.status,
+        });
+      }
       return;
     }
   }
@@ -600,7 +692,7 @@ export async function processInboundWebhook(
       origin: 'inbox',
     });
 
-    emitToBusiness(waNum.businessId.toString(), 'wa:new_message', {
+    emitToBranch(waNum.businessId.toString(), conv.branchId.toString(), 'wa:new_message', {
       conversationId: conv._id,
       message: msg,
     });

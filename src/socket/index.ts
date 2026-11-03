@@ -1,8 +1,11 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { Server as HttpServer } from 'http';
-import jwt from 'jsonwebtoken';
 import { env } from '../config';
 import { logger } from '../utils';
+import { AuthService } from '../services/auth.service';
+import { User } from '../models';
+
+const authService = new AuthService();
 
 let io: SocketIOServer | null = null;
 
@@ -10,7 +13,7 @@ export interface AuthenticatedSocket extends Socket {
   user?: {
     userId: string;
     businessId: string;
-    branchId?: string;
+    branchIds: string[];
     role: string;
   };
 }
@@ -26,8 +29,8 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
     transports: ['websocket', 'polling'],
   });
 
-  // Socket authentication middleware
-  io.use((socket: AuthenticatedSocket, next) => {
+  // Socket authentication: same checks as HTTP (signature, expiry, revoked session, active salon user)
+  io.use(async (socket: AuthenticatedSocket, next) => {
     try {
       const token =
         socket.handshake.auth?.token ||
@@ -38,12 +41,16 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         return next(new Error('Authentication token required'));
       }
 
-      const decoded = jwt.verify(token, env.JWT_SECRET) as any;
+      const decoded = await authService.verifyAccessToken(token);
+      if (decoded.kind !== 'tenant') return next(new Error('Salon users only'));
+      const user = await User.findById(decoded.sub, null, { skipTenantScope: true });
+      if (!user || user.status !== 'active') return next(new Error('User account is inactive or not found'));
+
       socket.user = {
-        userId: decoded.sub || decoded.userId,
-        businessId: decoded.businessId,
-        branchId: decoded.branchId,
-        role: decoded.role,
+        userId: user._id.toString(),
+        businessId: user.businessId.toString(),
+        branchIds: (user.branchIds || []).map((b) => b.toString()),
+        role: user.role,
       };
 
       return next();
@@ -59,15 +66,14 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       return;
     }
 
-    const { businessId, branchId, userId } = socket.user;
+    const { businessId, branchIds, userId, role } = socket.user;
     logger.info({ userId, businessId, socketId: socket.id }, 'Management Dashboard client connected to WebSocket');
 
-    // Join business tenant room
-    socket.join(`business:${businessId}`);
-
-    // Join branch room if branchId is present
-    if (branchId) {
-      socket.join(`branch:${branchId}`);
+    // Owners hear every branch; managers and branch logins only their own branches
+    if (role === 'owner') {
+      socket.join(`owners:${businessId}`);
+    } else {
+      for (const b of branchIds) socket.join(`branch:${b}`);
     }
 
     socket.on('disconnect', () => {
@@ -83,13 +89,15 @@ export function getSocketServer(): SocketIOServer | null {
   return io;
 }
 
-export function emitToBusiness(businessId: string, event: string, payload: any): void {
+/** Owners of the business only (events that span every branch, e.g. the provider's whole chat list). */
+export function emitToOwners(businessId: string, event: string, payload: any): void {
   if (!io) return;
-  io.to(`business:${businessId}`).emit(event, payload);
+  io.to(`owners:${businessId}`).emit(event, payload);
 }
 
-export function emitToBranch(branchId: string, event: string, payload: any): void {
+/** The owners plus every manager and branch login of one branch (each socket gets it once). */
+export function emitToBranch(businessId: string, branchId: string, event: string, payload: any): void {
   if (!io) return;
-  io.to(`branch:${branchId}`).emit(event, payload);
+  io.to(`owners:${businessId}`).to(`branch:${branchId}`).emit(event, payload);
 }
 

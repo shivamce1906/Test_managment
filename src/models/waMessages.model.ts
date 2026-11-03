@@ -63,6 +63,10 @@ waMessageSchema.plugin(baseFieldsPlugin);
 waMessageSchema.plugin(tenantScopePlugin);
 
 waMessageSchema.index({ conversationId: 1, createdAt: -1 });
-waMessageSchema.index({ providerMessageId: 1 }, { unique: true, sparse: true });
+// Provider ids are unique per business (two salons' providers may reuse an id); outbound sends without one are left out
+waMessageSchema.index(
+  { businessId: 1, providerMessageId: 1 },
+  { unique: true, partialFilterExpression: { providerMessageId: { $type: 'string' } } }
+);
 
 export const WaMessage = model<IWaMessage>('waMessages', waMessageSchema);

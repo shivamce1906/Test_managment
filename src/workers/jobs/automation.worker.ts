@@ -11,6 +11,7 @@ import {
 } from '../../models';
 import { logger } from '../../utils';
 import { toObjectId } from '../../services';
+import { defaultChatBranchId } from '../../services/whatsapp.service';
 import { whatsappSendQueue } from '../queues';
 
 export function createAutomationWorker(): Worker {
@@ -144,7 +145,7 @@ export function createAutomationWorker(): Worker {
               conversation = await WaConversation.create({
                 businessId: bId,
                 numberId: waNumber._id,
-                branchId: waNumber.branchIds[0] || bId,
+                branchId: await defaultChatBranchId(bId, waNumber),
                 phone: cust.phone,
                 customerId: cust._id,
                 lastMessageAt: new Date(),
@@ -203,7 +204,7 @@ export function createAutomationWorker(): Worker {
               conversation = await WaConversation.create({
                 businessId: bId,
                 numberId: waNumber._id,
-                branchId: waNumber.branchIds[0] || bId,
+                branchId: await defaultChatBranchId(bId, waNumber),
                 phone: cust.phone,
                 customerId: cust._id,
                 lastMessageAt: new Date(),
@@ -262,7 +263,7 @@ export function createAutomationWorker(): Worker {
               conversation = await WaConversation.create({
                 businessId: bId,
                 numberId: waNumber._id,
-                branchId: waNumber.branchIds[0] || bId,
+                branchId: await defaultChatBranchId(bId, waNumber),
                 phone: cust.phone,
                 customerId: cust._id,
                 lastMessageAt: new Date(),
@@ -321,7 +322,7 @@ export function createAutomationWorker(): Worker {
               conversation = await WaConversation.create({
                 businessId: bId,
                 numberId: waNumber._id,
-                branchId: waNumber.branchIds[0] || bId,
+                branchId: await defaultChatBranchId(bId, waNumber),
                 phone: cust.phone,
                 customerId: cust._id,
                 lastMessageAt: new Date(),

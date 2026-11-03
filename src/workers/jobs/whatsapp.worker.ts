@@ -15,6 +15,7 @@ import {
 import { logger, decrypt } from '../../utils';
 import { toObjectId } from '../../services';
 import { segmentationService } from '../../services/segmentation.service';
+import { defaultChatBranchId } from '../../services/whatsapp.service';
 import { whatsappSendQueue } from '../queues';
 
 export function createWhatsAppWorker(): Worker {
@@ -79,6 +80,15 @@ export function createWhatsAppWorker(): Worker {
           variables: message.variables,
           mediaUrl: message.mediaKey ? `https://storage.glox.io/${message.mediaKey}` : undefined,
         });
+
+        // Rejected by Instant Broadcast or Meta: retrying would fail the same way
+        if (!response.success) {
+          message.status = 'failed';
+          message.error = response.error || 'Rejected by Instant Broadcast';
+          await message.save();
+          logger.warn({ messageId, error: message.error }, 'WhatsApp message rejected by Instant Broadcast');
+          return;
+        }
 
         message.status = 'sent';
         message.providerMessageId = response.providerMessageId || `ib_${Date.now()}`;
@@ -161,6 +171,9 @@ export function createCampaignWorker(): Worker {
         }).distinct('_id');
       }
 
+      // New chats go to the number's branch (or the head branch), so branch logins can see them
+      const campaignNumber = await WaNumber.findOne({ _id: campaign.numberId, businessId: bId }).select('branchIds');
+
       const customers = await Customer.find({
         _id: { $in: customerIds },
         businessId: bId,
@@ -185,7 +198,7 @@ export function createCampaignWorker(): Worker {
         });
 
         if (!conversation) {
-          const branchId = toObjectId(cust.businessId);
+          const branchId = await defaultChatBranchId(bId, campaignNumber ?? {});
           conversation = await WaConversation.create({
             businessId: bId,
             numberId: campaign.numberId,

@@ -25,6 +25,45 @@ async function emitForChat(config: InstantBroadcastSocketConfig, chatId: string 
   emitToOwners(config.businessId, event, payload);
 }
 
+/**
+ * IB's `update_chat_list` carries each changed chat with its newest message as a JSON string
+ * (verified live 2026-11-03): `route` INCOMING = the customer wrote, OUTGOING = we sent it and
+ * `status` is its tick. Incoming messages are stored (duplicates by wamid are skipped); outgoing
+ * ones only move the tick of a message we sent.
+ */
+export async function ingestChatList(config: InstantBroadcastSocketConfig, data: any) {
+  const { applyMessageStatus, processInboundWebhook } = await import('../../services/whatsapp.service');
+  const chats: any[] = Array.isArray(data) ? data : Array.isArray(data?.chats) ? data.chats : [];
+  for (const chat of chats) {
+    let last: any = chat?.last_message;
+    if (typeof last === 'string') {
+      try {
+        last = JSON.parse(last);
+      } catch {
+        continue;
+      }
+    }
+    if (!last?.metaChatId || chat?.is_group) continue;
+
+    if (last.route === 'INCOMING') {
+      const mobile = String(chat.sender_mobile || last.senderMobile || '').replace(/\D/g, '');
+      if (!mobile) continue;
+      await processInboundWebhook(config.numberId, {
+        from: `+${mobile}`,
+        text: last.text?.body ?? last.msgContext?.text?.body ?? last.caption ?? undefined,
+        providerMessageId: last.metaChatId,
+        mediaUrl: last.mediaUrl || undefined,
+        senderName: chat.sender_name || last.senderName || undefined,
+        providerChatId: chat.chat_id,
+        // Unix seconds; the list replays old chats, so this keeps their 24-hour window honest
+        sentAt: Number(last.timestamp) > 0 ? new Date(Number(last.timestamp) * 1000) : undefined,
+      });
+    } else if (last.route === 'OUTGOING' && ['sent', 'delivered', 'read', 'failed'].includes(last.status)) {
+      await applyMessageStatus(config.businessId, last.metaChatId, last.status);
+    }
+  }
+}
+
 class InstantBroadcastSocketManager {
   private sockets: Map<string, Socket> = new Map();
   private wsUrl: string;
@@ -61,12 +100,18 @@ class InstantBroadcastSocketManager {
         token: config.userToken,
         agent: 'false',
       },
-      transports: ['websocket', 'polling'],
+      // IB refuses a direct WebSocket (HTTP 400); it accepts polling first, then upgrades
+      transports: ['polling', 'websocket'],
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
     });
+
+    // Live debugging: IB_LOG_RAW=true logs every provider event as received
+    if (process.env.IB_LOG_RAW === 'true') {
+      socket.onAny((event: string, ...args: any[]) => logger.info({ uid: config.uid, event, args }, 'Instant Broadcast raw event'));
+    }
 
     // 1. Handshake Confirmation
     socket.on('connection_ack', (info: any) => {
@@ -114,8 +159,13 @@ class InstantBroadcastSocketManager {
     });
 
     // 3. Conversations Ordering & Unread Sync (Server -> Client)
-    socket.on('update_chat_list', (data: any) => {
+    socket.on('update_chat_list', async (data: any) => {
       logger.debug({ uid: config.uid }, 'Instant Broadcast: update_chat_list received');
+      try {
+        await ingestChatList(config, data);
+      } catch (err: any) {
+        logger.error({ err: err.message, uid: config.uid }, 'Error processing update_chat_list event');
+      }
       emitToOwners(config.businessId, 'wa:chat_list_update', {
         numberId: config.numberId,
         data,

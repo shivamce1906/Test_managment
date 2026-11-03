@@ -10,7 +10,7 @@ const MONGO_URI = env.MONGODB_URI;
 async function bootstrap() {
   try {
     logger.info('Connecting to database...');
-    console.log("connection string", MONGO_URI)
+    
     await connectDb(MONGO_URI);
     logger.info('Database connected successfully');
 

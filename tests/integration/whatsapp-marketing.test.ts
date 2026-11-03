@@ -471,3 +471,129 @@ describe('WhatsApp accounts: one business per account', () => {
     expect(await WaMessage.countDocuments({ businessId: w.otherBusiness._id, providerMessageId: 'wamid.same' })).toBe(1);
   });
 });
+
+describe('WhatsApp live account: provider rejections are not reported as sent', () => {
+  useTestDb();
+  let w: World;
+  const realFetch = global.fetch;
+  beforeEach(async () => {
+    w = await seedWorld({ gst: false });
+  });
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  async function liveSetup() {
+    const s = await waSetup(w);
+    await WaNumber.updateOne({ _id: s.number._id, businessId: w.business._id }, { 'instantBroadcast.userTokenEnc': encryptData('live-token') });
+    return s;
+  }
+
+  it('Meta refusing a template (HTTP 200, success false) saves the message as failed with the reason', async () => {
+    const { convA, template } = await liveSetup();
+    global.fetch = jest.fn().mockResolvedValue(new Response(
+      JSON.stringify({ success: false, message: '(#131008) Required parameter is missing', refunded: true }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )) as any;
+    const res = await as(w.tokens.owner).post('/whatsapp/messages', { conversationId: convA._id.toString(), templateId: template._id.toString(), variables: [] });
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe('failed');
+    expect(res.body.error).toBe('(#131008) Required parameter is missing');
+  });
+
+  it('an accepted send keeps the WhatsApp message id; a network error is failed, not simulated', async () => {
+    const { convA } = await liveSetup();
+    global.fetch = jest.fn().mockResolvedValue(new Response(
+      JSON.stringify({ success: true, messageId: 'wamid.live1' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )) as any;
+    const ok = await as(w.tokens.owner).post('/whatsapp/messages', { conversationId: convA._id.toString(), text: 'hello' });
+    expect(ok.body).toMatchObject({ status: 'sent', providerMessageId: 'wamid.live1' });
+
+    global.fetch = jest.fn().mockRejectedValue(new Error('getaddrinfo ENOTFOUND')) as any;
+    const down = await as(w.tokens.owner).post('/whatsapp/messages', { conversationId: convA._id.toString(), text: 'hello again' });
+    expect(down.body.status).toBe('failed');
+    expect(down.body.error).toMatch(/unreachable/);
+  });
+
+  it('a live account whose template list cannot be read gets no made-up templates', async () => {
+    const { number } = await liveSetup();
+    global.fetch = jest.fn().mockResolvedValue(new Response('<!doctype html>', { status: 200, headers: { 'Content-Type': 'text/html' } })) as any;
+    const admin = await createPlatformAdmin();
+    await as(platformToken(admin)).post(`/admin/businesses/${w.business._id}/wa-config`, { phone: '+919800000099', uid: 'ib-uid-1', userToken: 'live-token' });
+    expect(await WaTemplate.countDocuments({ businessId: w.business._id, numberId: number._id, name: 'booking_confirmation' })).toBe(0);
+  });
+});
+
+describe('WhatsApp chats always land in a real branch', () => {
+  useTestDb();
+  let w: World;
+  beforeEach(async () => {
+    w = await seedWorld({ gst: false });
+  });
+
+  it('a number with no branches files new chats under a branch of the business, never the business id', async () => {
+    const { number } = await waSetup(w);
+    const { defaultChatBranchId } = await import('../../src/services/whatsapp.service');
+    const branchIds = [w.branchA._id.toString(), w.branchB._id.toString()];
+
+    expect(branchIds).toContain(String(await defaultChatBranchId(w.business._id, { branchIds: [] })));
+    expect(String(await defaultChatBranchId(w.business._id, { branchIds: [w.branchB._id] }))).toBe(w.branchB._id.toString());
+
+    await processInboundWebhook(number._id, { from: '+919700011122', text: 'new person', providerMessageId: 'wamid.newp' });
+    const conv = await WaConversation.findOne({ businessId: w.business._id, phone: '+919700011122' });
+    expect(branchIds).toContain(conv!.branchId.toString());
+    expect(conv!.branchId.toString()).not.toBe(w.business._id.toString());
+  });
+});
+
+describe('Instant Broadcast update_chat_list (real payload shape, captured 2026-11-03)', () => {
+  useTestDb();
+  let w: World;
+  beforeEach(async () => {
+    w = await seedWorld({ gst: false });
+  });
+
+  const chatItem = (last: Record<string, unknown>) => ({
+    id: 1274086, chat_id: 'jjDijSSIiUII', sender_name: 'shivam', sender_mobile: '917016620542', is_group: 0,
+    last_message: JSON.stringify({ senderMobile: '917016620542', senderName: 'shivam', origin: 'meta', ...last }),
+  });
+
+  it('stores an incoming message once, links the customer, and moves our sent message\'s tick forward only', async () => {
+    const { number } = await waSetup(w);
+    const { ingestChatList } = await import('../../src/integrations/instantbroadcast/instantbroadcast.socket');
+    const config = { uid: 'ib-uid-1', userToken: 'key', businessId: w.business._id.toString(), numberId: number._id.toString() };
+    const customer = await as(w.tokens.owner).post('/customers', { name: 'Shivam', phone: '+917016620542' });
+    expect(customer.status).toBe(201);
+
+    const incoming = chatItem({ type: 'text', metaChatId: 'wamid.IN1', route: 'INCOMING', status: '', text: { preview_url: true, body: 'Hii' } });
+    await ingestChatList(config, [incoming]);
+    await ingestChatList(config, [incoming]); // IB repeats the list
+    const msgs = await WaMessage.find({ businessId: w.business._id, providerMessageId: 'wamid.IN1' });
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({ direction: 'in', text: 'Hii' });
+    const conv = await WaConversation.findOne({ businessId: w.business._id, _id: msgs[0].conversationId });
+    expect(conv!.customerId?.toString()).toBe(customer.body._id);
+    expect(conv!.providerChatId).toBe('jjDijSSIiUII');
+
+    await WaMessage.create({ businessId: w.business._id, conversationId: conv!._id, direction: 'out', kind: 'text', text: 'ok', status: 'sent', providerMessageId: 'wamid.OUT1' });
+    const out = (status: string) => chatItem({ type: 'text', metaChatId: 'wamid.OUT1', route: 'OUTGOING', status });
+    await ingestChatList(config, [out('delivered')]);
+    await ingestChatList(config, [out('sent')]); // stale repeat
+    expect((await WaMessage.findOne({ businessId: w.business._id, providerMessageId: 'wamid.OUT1' }))!.status).toBe('delivered');
+    await ingestChatList(config, [out('read')]);
+    expect((await WaMessage.findOne({ businessId: w.business._id, providerMessageId: 'wamid.OUT1' }))!.status).toBe('read');
+
+    // A replayed old chat keeps its real time, so its 24-hour window stays closed
+    const twoDaysAgo = Math.floor(Date.now() / 1000) - 2 * 86400;
+    await ingestChatList(config, [{ ...chatItem({ type: 'text', metaChatId: 'wamid.OLD', route: 'INCOMING', timestamp: twoDaysAgo, text: { body: 'old' } }), sender_mobile: '919811122233' }]);
+    const old = await WaMessage.findOne({ businessId: w.business._id, providerMessageId: 'wamid.OLD' });
+    expect(old!.createdAt.getTime()).toBe(twoDaysAgo * 1000);
+    const oldConv = await WaConversation.findOne({ businessId: w.business._id, _id: old!.conversationId });
+    expect(oldConv!.lastInboundAt!.getTime()).toBe(twoDaysAgo * 1000);
+
+    // An outgoing message we never sent (e.g. typed in IB's own dashboard) is not invented
+    await ingestChatList(config, [chatItem({ type: 'template', metaChatId: 'wamid.DASH', route: 'OUTGOING', status: 'sent' })]);
+    expect(await WaMessage.countDocuments({ businessId: w.business._id, providerMessageId: 'wamid.DASH' })).toBe(0);
+  });
+});

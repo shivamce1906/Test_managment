@@ -381,6 +381,7 @@ export async function sendMessage(
     templateId: input.templateId ? new Types.ObjectId(input.templateId) : undefined,
     variables: input.variables,
     status: sendResult.success ? 'sent' : 'failed',
+    error: sendResult.error,
     origin: 'inbox',
     sentBy: ctx.userId,
     createdBy: ctx.userId,
@@ -557,6 +558,47 @@ export function webhookSecretMatches(waNum: any, provided: string | undefined): 
 /** Old builds stored these placeholders as the secret; they are replaced on the next save. */
 const WEAK_WEBHOOK_SECRETS = ['secret', 'default-webhook-secret'];
 
+/**
+ * The branch a new chat belongs to: the number's first branch, else the head branch, else the
+ * oldest branch. Never the business id, which no manager or branch login could ever see.
+ */
+export async function defaultChatBranchId(businessId: Types.ObjectId | string, waNum: { branchIds?: Types.ObjectId[] }) {
+  if (waNum.branchIds?.length) return waNum.branchIds[0];
+  const business = await Business.findById(businessId).select('headBranchId');
+  const head = business?.headBranchId
+    ? await Branch.findOne({ _id: business.headBranchId, businessId }).select('_id')
+    : null;
+  const branch = head || (await Branch.findOne({ businessId }).sort({ createdAt: 1 }).select('_id'));
+  if (!branch) throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'This business has no branch to put the chat in');
+  return branch._id;
+}
+
+const STATUS_RANK: Record<string, number> = { queued: 0, sent: 1, delivered: 2, read: 3 };
+
+/**
+ * Moves one outbound message's tick forward (sent → delivered → read; failed always applies) and
+ * tells its branch. Providers resend old states, so a tick never goes back. False = no such message.
+ */
+export async function applyMessageStatus(businessId: Types.ObjectId | string, providerMessageId: string, status: string) {
+  const message = await WaMessage.findOne({ businessId, providerMessageId });
+  if (!message) return false;
+  const forward = status === 'failed' || (STATUS_RANK[status] ?? -1) > (STATUS_RANK[message.status] ?? 0);
+  if (!forward || message.status === status) return true;
+
+  message.status = status as any;
+  await message.save();
+  const conv = await WaConversation.findOne({ _id: message.conversationId, businessId }).select('branchId');
+  if (conv) {
+    emitToBranch(businessId.toString(), conv.branchId.toString(), 'wa:message_status', {
+      conversationId: message.conversationId,
+      messageId: message._id,
+      providerMessageId,
+      status,
+    });
+  }
+  return true;
+}
+
 export async function processInboundWebhook(
   numberId: string | Types.ObjectId,
   payload: {
@@ -567,32 +609,21 @@ export async function processInboundWebhook(
     mediaUrl?: string;
     senderName?: string;
     providerChatId?: string;
+    /** When the customer sent it (providers replay old messages); defaults to now. */
+    sentAt?: Date;
   }
 ) {
   const waNum = await findWaNumberForWebhook(numberId);
   if (!waNum) return;
+  const now = new Date();
+  const sentAt = payload.sentAt && !Number.isNaN(payload.sentAt.getTime()) && payload.sentAt < now ? payload.sentAt : now;
+  const later = (a: Date | undefined) => (a && a > sentAt ? a : sentAt);
 
   const phone = normalizePhone(payload.from);
 
   // 1. Delivery status callback on existing outbound message
   if (payload.status && payload.providerMessageId) {
-    const updated = await WaMessage.findOneAndUpdate(
-      { businessId: waNum.businessId, providerMessageId: payload.providerMessageId },
-      { $set: { status: payload.status as any } },
-      { new: true }
-    );
-    if (updated) {
-      const statusConv = await WaConversation.findOne({ _id: updated.conversationId, businessId: waNum.businessId }).select('branchId');
-      if (statusConv) {
-        emitToBranch(waNum.businessId.toString(), statusConv.branchId.toString(), 'wa:message_status', {
-          conversationId: updated.conversationId,
-          messageId: updated._id,
-          providerMessageId: payload.providerMessageId,
-          status: payload.status,
-        });
-      }
-      return;
-    }
+    if (await applyMessageStatus(waNum.businessId, payload.providerMessageId, payload.status)) return;
   }
 
   // 2. Duplicate provider message check
@@ -610,8 +641,7 @@ export async function processInboundWebhook(
   if (!customer) {
     lead = await Lead.findOne({ businessId: waNum.businessId, phone });
     if (!lead) {
-      const headBranch = await Branch.findOne({ businessId: waNum.businessId }).sort({ createdAt: 1 });
-      const branchId = waNum.branchIds.length > 0 ? waNum.branchIds[0] : (headBranch?._id || new Types.ObjectId());
+      const branchId = await defaultChatBranchId(waNum.businessId, waNum);
       lead = await Lead.create({
         businessId: waNum.businessId,
         branchId,
@@ -623,14 +653,9 @@ export async function processInboundWebhook(
     }
   }
 
-  const business = await Business.findById(waNum.businessId);
-  const headBranch = business?.headBranchId
-    ? await Branch.findOne({ _id: business.headBranchId, businessId: waNum.businessId })
-    : await Branch.findOne({ businessId: waNum.businessId }).sort({ createdAt: 1 });
-
   const defaultBranchId = waNum.branchIds.length > 0
     ? waNum.branchIds[0]
-    : (lead?.branchId || headBranch?._id || new Types.ObjectId());
+    : (lead?.branchId || (await defaultChatBranchId(waNum.businessId, waNum)));
 
   let conv = await WaConversation.findOne({
     businessId: waNum.businessId,
@@ -647,13 +672,14 @@ export async function processInboundWebhook(
       providerChatId: payload.providerChatId,
       customerId: customer?._id,
       leadId: lead?._id,
-      lastMessageAt: new Date(),
-      lastInboundAt: new Date(),
+      lastMessageAt: sentAt,
+      lastInboundAt: sentAt,
       unread: 1,
     });
   } else {
-    conv.lastMessageAt = new Date();
-    conv.lastInboundAt = new Date();
+    // The 24-hour window counts from when the customer wrote, not when we heard about it
+    conv.lastMessageAt = later(conv.lastMessageAt);
+    conv.lastInboundAt = later(conv.lastInboundAt);
     conv.unread += 1;
     if (payload.providerChatId && !conv.providerChatId) {
       conv.providerChatId = payload.providerChatId;
@@ -690,6 +716,7 @@ export async function processInboundWebhook(
       senderName: payload.senderName,
       status: 'delivered',
       origin: 'inbox',
+      createdAt: sentAt,
     });
 
     emitToBranch(waNum.businessId.toString(), conv.branchId.toString(), 'wa:new_message', {

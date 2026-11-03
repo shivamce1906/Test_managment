@@ -5,7 +5,8 @@ import { logger } from '../utils';
 import { AuthService } from '../services/auth.service';
 import { User } from '../models';
 
-const authService = new AuthService();
+// Created on first use: auth.service imports services that import this module
+let authService: AuthService | null = null;
 
 let io: SocketIOServer | null = null;
 
@@ -41,7 +42,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         return next(new Error('Authentication token required'));
       }
 
-      const decoded = await authService.verifyAccessToken(token);
+      const decoded = await (authService ??= new AuthService()).verifyAccessToken(token);
       if (decoded.kind !== 'tenant') return next(new Error('Salon users only'));
       const user = await User.findById(decoded.sub, null, { skipTenantScope: true });
       if (!user || user.status !== 'active') return next(new Error('User account is inactive or not found'));

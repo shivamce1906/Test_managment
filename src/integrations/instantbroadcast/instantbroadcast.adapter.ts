@@ -99,8 +99,9 @@ export class InstantBroadcastAdapter {
           });
         }
 
-        if (response.ok) {
-          const resData: any = await response.json();
+        const resData: any = await response.json().catch(() => ({}));
+        // A Meta rejection comes back as HTTP 200 with success: false
+        if (response.ok && resData.success !== false) {
           const providerMsgId = resData.data?.id || resData.messageId || resData.id || mockId;
           return {
             success: true,
@@ -110,12 +111,13 @@ export class InstantBroadcastAdapter {
             costPaise,
             lowBalance: Boolean(resData.lowBalance),
           };
-        } else {
-          const errText = await response.text();
-          logger.warn({ status: response.status, errText }, 'Instant Broadcast API returned error response');
         }
+        const error = resData.message || `Instant Broadcast returned HTTP ${response.status}`;
+        logger.warn({ status: response.status, error, meta: resData.metaResponse?.error }, 'Instant Broadcast rejected the message');
+        return { success: false, status: 'failed', error };
       } catch (networkErr: any) {
-        logger.warn({ err: networkErr.message }, 'Instant Broadcast API request failed; falling back to simulated dispatch');
+        logger.warn({ err: networkErr.message }, 'Instant Broadcast API request failed');
+        return { success: false, status: 'failed', error: `Instant Broadcast unreachable: ${networkErr.message}` };
       }
     }
 
@@ -150,9 +152,12 @@ export class InstantBroadcastAdapter {
             return data.templates || data;
           }
         }
+        logger.warn({ status: response.status }, 'Instant Broadcast did not return a template list');
       } catch (err: any) {
         logger.warn({ err: err.message }, 'Failed to fetch templates from live Instant Broadcast endpoint');
       }
+      // A live account never gets the sample templates below: Meta would reject them
+      return [];
     }
 
     // Standard baseline templates

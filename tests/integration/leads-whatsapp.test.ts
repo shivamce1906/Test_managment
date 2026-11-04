@@ -77,10 +77,11 @@ describe('Leads (PRD §11)', () => {
     expect(list).toHaveLength(0);
   });
 
-  it('lead phone is masked for the branch login in lists', async () => {
+  // Changed 2026-11-03 (product decision): the branch desk calls leads back, so it sees the full phone
+  it('the branch login sees the full lead phone (own branch only)', async () => {
     await lead(w, w.tokens.owner);
     const res = await as(w.tokens.branchA).get('/leads');
-    expect(JSON.stringify(res.body)).not.toContain('9811100000');
+    expect(res.body[0].phone).toBe('+919811100000');
   });
 });
 

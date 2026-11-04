@@ -56,3 +56,6 @@ export * from './notifications.model';
 export * from './dailySummaries.model';
 export * from './changeCursors.model';
 export * from './importJobs.model';
+export * from './marketingSegments.model';
+export * from './marketingOffers.model';
+

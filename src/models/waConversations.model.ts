@@ -7,6 +7,16 @@ export interface IWaConversation extends Document {
   numberId: Types.ObjectId;
   branchId: Types.ObjectId;
   phone: string;
+  providerChatId?: string;
+  notes?: {
+    note: string;
+    authorId?: Types.ObjectId;
+    createdAt: Date;
+  }[];
+  contactMeta?: {
+    profilePicUrl?: string;
+    pushName?: string;
+  };
   customerId?: Types.ObjectId;
   leadId?: Types.ObjectId;
   lastMessageAt: Date;
@@ -23,6 +33,18 @@ const waConversationSchema = new Schema<IWaConversation>(
     numberId: { type: Schema.Types.ObjectId, ref: 'waNumbers', required: true },
     branchId: { type: Schema.Types.ObjectId, ref: 'branches', required: true },
     phone: { type: String, required: true },
+    providerChatId: { type: String },
+    notes: [
+      {
+        note: { type: String, required: true },
+        authorId: { type: Schema.Types.ObjectId, ref: 'users' },
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
+    contactMeta: {
+      profilePicUrl: { type: String },
+      pushName: { type: String },
+    },
     customerId: { type: Schema.Types.ObjectId, ref: 'customers' },
     leadId: { type: Schema.Types.ObjectId, ref: 'leads' },
     lastMessageAt: { type: Date, default: Date.now, required: true },

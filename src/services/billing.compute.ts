@@ -67,6 +67,8 @@ export interface ComputeBillInput {
   }[];
   gstApplied: boolean;
   businessGstBps: number;
+  /** Marketing offer discount (already validated), spread over service and product lines after the bill discount. */
+  offerDiscountPaise?: number;
 }
 
 export interface ComputeBillOutput {
@@ -89,11 +91,12 @@ export interface ComputeBillOutput {
     paidPaise: number;
     duePaise: number;
     totalTipsPaise: number;
+    offerDiscountPaise: number;
   };
 }
 
 export function computeBill(input: ComputeBillInput): ComputeBillOutput {
-  const { lines, billDiscount, redemptions = [], tips = [], payments = [], gstApplied, businessGstBps } = input;
+  const { lines, billDiscount, redemptions = [], tips = [], payments = [], gstApplied, businessGstBps, offerDiscountPaise = 0 } = input;
 
   let totalGrossPaise = 0;
   const lineDrafts = lines.map((line, idx) => {
@@ -150,6 +153,13 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
     lineDrafts.map((l) => l.preBillDiscountValue)
   );
 
+  // 3b. Marketing offer: services and products only (never plan sales or wallet top-ups)
+  const offerBase = lineDrafts.map((l, i) =>
+    l.kind === 'service' || l.kind === 'product' ? Math.max(0, l.preBillDiscountValue - billDiscountShares[i]) : 0
+  );
+  const appliedOfferPaise = Math.min(offerDiscountPaise, offerBase.reduce((a, b) => a + b, 0));
+  const offerShares = distributeProRata(appliedOfferPaise, offerBase);
+
   // 4. Loyalty & Voucher redemption discounts
   const redemptionDiscountPaise = redemptions
     .filter((r) => r.kind === 'loyalty' || r.kind === 'voucher')
@@ -157,7 +167,7 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
 
   const redemptionShares = distributeProRata(
     redemptionDiscountPaise,
-    lineDrafts.map((l, i) => Math.max(0, l.preBillDiscountValue - billDiscountShares[i]))
+    lineDrafts.map((l, i) => Math.max(0, l.preBillDiscountValue - billDiscountShares[i] - offerShares[i]))
   );
 
   // 5. Final line values, GST, and Commission
@@ -169,7 +179,7 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
   const computedLines = lineDrafts.map((l, i) => {
     let taxablePaise = l.isPackageRedeemed
       ? 0
-      : Math.max(0, l.preBillDiscountValue - billDiscountShares[i] - redemptionShares[i]);
+      : Math.max(0, l.preBillDiscountValue - billDiscountShares[i] - offerShares[i] - redemptionShares[i]);
 
     const lineTotalDiscount = l.grossPaise - taxablePaise;
     totalAllDiscountsPaise += lineTotalDiscount;
@@ -291,6 +301,7 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
       paidPaise: totalPaidPaise,
       duePaise,
       totalTipsPaise,
+      offerDiscountPaise: appliedOfferPaise,
     },
   };
 }

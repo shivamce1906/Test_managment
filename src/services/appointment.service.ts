@@ -21,9 +21,11 @@ import {
   isOverlapping,
   normalizePhone,
   maskPhone,
+  logger,
 } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
+import { sendAppointmentFeedbackMessage } from './whatsapp.service';
 // import { notificationService } from './notification.service'
 
 // 'billed' is never set by hand: saving a bill with appointmentId moves the appointment there
@@ -589,6 +591,14 @@ export class AppointmentService {
     });
 
     await appointment.save();
+
+    if (newStatus === 'completed') {
+      try {
+        await sendAppointmentFeedbackMessage(appointment._id);
+      } catch (err) {
+        logger.error({ err, appointmentId: appointment._id }, 'Failed to trigger post-appointment feedback message');
+      }
+    }
 
     await auditService.logAction({
       ctx,

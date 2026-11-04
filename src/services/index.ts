@@ -17,3 +17,7 @@ export * from './dayend.service';
 export * from './report.service';
 export * from './notification.service';
 export * from './migration.service';
+export * from './segmentation.service';
+export * from './marketingOffer.service';
+export * from './marketingCampaign.service';
+

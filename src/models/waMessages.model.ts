@@ -12,6 +12,8 @@ export interface IWaMessage extends Document {
   templateId?: Types.ObjectId;
   variables?: string[];
   mediaKey?: string;
+  mediaUrl?: string;
+  senderName?: string;
   status: 'queued' | 'sent' | 'delivered' | 'read' | 'failed';
   error?: string;
   costPaise?: number;
@@ -33,6 +35,8 @@ const waMessageSchema = new Schema<IWaMessage>(
     templateId: { type: Schema.Types.ObjectId, ref: 'waTemplates' },
     variables: [{ type: String }],
     mediaKey: { type: String },
+    mediaUrl: { type: String },
+    senderName: { type: String },
     status: {
       type: String,
       enum: ['queued', 'sent', 'delivered', 'read', 'failed'],
@@ -59,6 +63,10 @@ waMessageSchema.plugin(baseFieldsPlugin);
 waMessageSchema.plugin(tenantScopePlugin);
 
 waMessageSchema.index({ conversationId: 1, createdAt: -1 });
-waMessageSchema.index({ providerMessageId: 1 }, { unique: true, sparse: true });
+// Provider ids are unique per business (two salons' providers may reuse an id); outbound sends without one are left out
+waMessageSchema.index(
+  { businessId: 1, providerMessageId: 1 },
+  { unique: true, partialFilterExpression: { providerMessageId: { $type: 'string' } } }
+);
 
 export const WaMessage = model<IWaMessage>('waMessages', waMessageSchema);

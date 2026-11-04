@@ -3,13 +3,24 @@ import { objectIdSchema } from './common.schema';
 
 export const configureWaNumberSchema = z.object({
   phone: z.string().min(10, 'Valid WhatsApp phone is required'),
-  apiKey: z.string().min(1, 'AiSensy API key is required'),
-  projectId: z.string().min(1, 'AiSensy project ID is required'),
-  webhookSecret: z.string().optional().default('default-webhook-secret'),
+  uid: z.string().optional(),
+  userToken: z.string().optional(),
+  apiKey: z.string().optional(),
+  projectId: z.string().optional(),
+  webhookSecret: z.string().min(16, 'Use at least 16 characters').optional(),
   branchIds: z.array(objectIdSchema).optional(),
 });
 
+export const saveChatNoteSchema = z.object({
+  note: z.string().min(1, 'Note cannot be empty'),
+});
+
+export const markChatReadSchema = z.object({
+  chatId: z.string().optional(),
+});
+
 export const sendWaMessageSchema = z.object({
+  conversationId: objectIdSchema.optional(),
   text: z.string().min(1).optional(),
   templateId: objectIdSchema.optional(),
   variables: z.array(z.string()).optional(),

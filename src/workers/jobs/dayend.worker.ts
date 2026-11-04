@@ -9,8 +9,12 @@ import {
   WaConversation,
   WaNumber,
   User,
+  Appointment,
+  Expense,
+  DayClosure,
+  AutomationSend,
 } from '../../models';
-import { logger } from '../../utils';
+import { logger, getBusinessDate } from '../../utils';
 import { toObjectId } from '../../services';
 import { whatsappSendQueue } from '../queues';
 
@@ -19,48 +23,107 @@ export function createDayEndWorker(): Worker {
 
   return new Worker(
     'day-end-report',
-    async (job: Job<{ businessId: string; date: string }>) => {
-      const { businessId, date } = job.data;
-      const bId = toObjectId(businessId);
-      logger.info({ businessId, date }, 'Generating day-end-report job');
+    async (job: Job<{ businessId?: string; date?: string; branchId?: string }>) => {
+      const { businessId, date: requestedDate, branchId: requestedBranchId } = job.data || {};
+      const date = requestedDate || getBusinessDate();
+      logger.info({ businessId, date, branchId: requestedBranchId }, 'Generating day-end-report job');
 
-      const business = await Business.findById(bId);
-      if (!business) return;
+      const businesses = businessId
+        ? await Business.find({ _id: toObjectId(businessId), status: 'active' })
+        : await Business.find({ status: 'active' });
 
-      const waNumber = await WaNumber.findOne({ businessId: bId, status: 'active' });
+      for (const business of businesses) {
+        const bId = business._id;
+        const waNumber = await WaNumber.findOne({ businessId: bId, status: 'active' });
 
-      const branches = await Branch.find({ businessId: bId, status: 'active' });
-      for (const branch of branches) {
-        const bills = await Bill.find({
-          businessId: bId,
-          branchId: branch._id,
-          businessDate: date,
-          status: { $in: ['paid', 'partly_paid'] },
-        });
-
-        const totalRevenuePaise = bills.reduce((acc, b) => acc + (b.totals?.totalPaise || 0), 0);
-        const billCount = bills.length;
-
-        const pdfBuffer = await generateDayEndPdf({
-          branchName: branch.name,
-          businessDate: date,
-          expectedCashPaise: totalRevenuePaise,
-          countedCashPaise: totalRevenuePaise,
-          diffCashPaise: 0,
-          upiPaise: 0,
-          cardPaise: 0,
-        });
-
-        const s3Key = `reports/${bId}/${branch._id}/dayend-${date}.pdf`;
-        await s3Adapter.uploadBuffer(s3Key, pdfBuffer, 'application/pdf');
-
-        // Send WhatsApp report to owner if configured
         const owner = await User.findOne({ businessId: bId, role: 'owner', status: 'active' });
-        if (owner && owner.phone && waNumber) {
+        const ownerPhone = business.ownerWhatsappPhone || owner?.phone;
+        if (!ownerPhone || !waNumber) continue;
+
+        const branchFilter: any = { businessId: bId, status: 'active' };
+        if (requestedBranchId) {
+          branchFilter._id = toObjectId(requestedBranchId);
+        }
+        const branches = await Branch.find(branchFilter);
+
+        for (const branch of branches) {
+          const bills = await Bill.find({
+            businessId: bId,
+            branchId: branch._id,
+            businessDate: date,
+            status: { $in: ['paid', 'partly_paid'] },
+          });
+
+          const totalRevenuePaise = bills.reduce((acc, b) => acc + (b.totals?.totalPaise || 0), 0);
+          const grossSalesPaise = bills.reduce((acc, b) => acc + (b.totals?.grossPaise || 0), 0);
+          const discountPaise = bills.reduce((acc, b) => acc + (b.totals?.discountPaise || 0), 0);
+
+          let cashPaise = 0;
+          let upiPaise = 0;
+          let cardPaise = 0;
+          let walletPaise = 0;
+
+          for (const b of bills) {
+            for (const p of b.payments || []) {
+              if (p.mode === 'cash') cashPaise += p.amountPaise;
+              else if (p.mode === 'upi') upiPaise += p.amountPaise;
+              else if (p.mode === 'card') cardPaise += p.amountPaise;
+              else if (p.mode === 'wallet') walletPaise += p.amountPaise;
+            }
+          }
+
+          const billCount = bills.length;
+
+          // Appointments statistics
+          const appts = await Appointment.find({
+            businessId: bId,
+            branchId: branch._id,
+            businessDate: date,
+          });
+          const completedAppts = appts.filter((a) => a.status === 'completed' || a.status === 'billed').length;
+          const cancelledAppts = appts.filter((a) => a.status === 'cancelled' || a.status === 'no_show').length;
+
+          // Day closure details if already submitted/approved
+          const closure = await DayClosure.findOne({
+            businessId: bId,
+            branchId: branch._id,
+            businessDate: date,
+          });
+
+          const expectedCashPaise = closure?.expected?.cashPaise ?? cashPaise;
+          const countedCashPaise = closure?.counted?.cashPaise ?? expectedCashPaise;
+          const diffCashPaise = closure?.diff?.cashPaise ?? 0;
+
+          // Expenses
+          const expenses = await Expense.find({
+            businessId: bId,
+            branchId: branch._id,
+            businessDate: date,
+          });
+          const totalExpensePaise = expenses.reduce((acc, e) => acc + (e.amountPaise || 0), 0);
+
+          let s3Key: string | undefined;
+          try {
+            const pdfBuffer = await generateDayEndPdf({
+              branchName: branch.name,
+              businessDate: date,
+              expectedCashPaise,
+              countedCashPaise,
+              diffCashPaise,
+              upiPaise,
+              cardPaise,
+            });
+
+            s3Key = `reports/${bId}/${branch._id}/dayend-${date}.pdf`;
+            await s3Adapter.uploadBuffer(s3Key, pdfBuffer, 'application/pdf');
+          } catch (pdfErr) {
+            logger.warn({ pdfErr, branchId: branch._id }, 'Could not generate DayEnd PDF buffer');
+          }
+
           let conversation = await WaConversation.findOne({
             businessId: bId,
             numberId: waNumber._id,
-            phone: owner.phone,
+            phone: ownerPhone,
           });
 
           if (!conversation) {
@@ -68,22 +131,66 @@ export function createDayEndWorker(): Worker {
               businessId: bId,
               numberId: waNumber._id,
               branchId: branch._id,
-              phone: owner.phone,
+              phone: ownerPhone,
               lastMessageAt: new Date(),
               unread: 0,
             });
+          }
+
+          const reportText = [
+            `📊 *DAY END REPORT - ${branch.name}*`,
+            `📅 Date: ${date}`,
+            `──────────────────────`,
+            `💰 *Collections & Sales:*`,
+            `• Net Sales: ₹${(totalRevenuePaise / 100).toFixed(2)}`,
+            `• Gross Sales: ₹${(grossSalesPaise / 100).toFixed(2)}`,
+            `• Discounts: ₹${(discountPaise / 100).toFixed(2)}`,
+            ``,
+            `💳 *Payment Modes:*`,
+            `• Cash: ₹${(cashPaise / 100).toFixed(2)}`,
+            `• UPI: ₹${(upiPaise / 100).toFixed(2)}`,
+            `• Card: ₹${(cardPaise / 100).toFixed(2)}`,
+            `• Wallet: ₹${(walletPaise / 100).toFixed(2)}`,
+            ``,
+            `🧾 *Activity Summary:*`,
+            `• Invoices Raised: ${billCount}`,
+            `• Completed Appointments: ${completedAppts}`,
+            `• Cancelled / No-shows: ${cancelledAppts}`,
+            ``,
+            `💵 *Cash Drawer (Till):*`,
+            `• Expected Cash: ₹${(expectedCashPaise / 100).toFixed(2)}`,
+            `• Counted Cash: ₹${(countedCashPaise / 100).toFixed(2)}`,
+            `• Till Difference: ₹${(diffCashPaise / 100).toFixed(2)}`,
+            `• Till Expenses: ₹${(totalExpensePaise / 100).toFixed(2)}`,
+            `──────────────────────`,
+            s3Key ? `📄 PDF Report: https://storage.glox.io/${s3Key}` : ``,
+          ]
+            .filter(Boolean)
+            .join('\n');
+
+          const dedupeId = `dayend_report:${branch._id}:${date}`;
+          const existingSend = await AutomationSend.findById(dedupeId);
+          if (existingSend) {
+            // Already sent daily report for this branch and date
+            continue;
           }
 
           const msg = await WaMessage.create({
             businessId: bId,
             conversationId: conversation._id,
             direction: 'out',
-            kind: 'template',
-            variables: [branch.name, date, (totalRevenuePaise / 100).toFixed(2), String(billCount)],
+            kind: 'text',
+            text: reportText,
             mediaKey: s3Key,
             origin: 'transactional',
             status: 'queued',
           });
+
+          await AutomationSend.findOneAndUpdate(
+            { _id: dedupeId },
+            { businessId: bId, messageId: msg._id, at: new Date() },
+            { upsert: true }
+          );
 
           await whatsappSendQueue().add(
             'send',

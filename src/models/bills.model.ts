@@ -120,6 +120,12 @@ export interface IBill extends Document {
     reason: string;
   };
   refunds: IBillRefund[];
+  marketingOffer?: {
+    offerId?: Types.ObjectId;
+    code?: string;
+    campaignId?: Types.ObjectId;
+    discountPaise?: number;
+  };
   idempotencyKey: string;
   createdAt: Date;
   updatedAt: Date;
@@ -254,6 +260,12 @@ const billSchema = new Schema<IBill>(
         businessDate: { type: String, required: true },
       },
     ],
+    marketingOffer: {
+      offerId: { type: Schema.Types.ObjectId, ref: 'marketingOffers' },
+      code: { type: String },
+      campaignId: { type: Schema.Types.ObjectId, ref: 'campaigns' },
+      discountPaise: { type: Number, default: 0 },
+    },
     idempotencyKey: { type: String, required: true },
   },
   {

@@ -48,6 +48,8 @@ export const env = {
   AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY || 'mock-secret-key',
   AISENSY_BASE_URL: process.env.AISENSY_BASE_URL || 'https://backend.aisensy.com',
   AISENSY_API_KEY: process.env.AISENSY_API_KEY || 'mock-aisensy-key',
+  INSTANT_BROADCAST_BASE_URL: process.env.INSTANT_BROADCAST_BASE_URL || 'https://api.instantbroadcast.in',
+  INSTANT_BROADCAST_WS_URL: process.env.INSTANT_BROADCAST_WS_URL || 'https://api.instantbroadcast.in',
   WEBHOOK_BASE_URL: process.env.WEBHOOK_BASE_URL || 'http://localhost:4000/api/v1/webhooks',
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
   SENTRY_DSN: process.env.SENTRY_DSN || '',

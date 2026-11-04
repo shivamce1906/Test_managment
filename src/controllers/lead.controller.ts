@@ -5,6 +5,8 @@ import {
   getLeads,
   getLeadById,
   convertLead,
+  addLeadFollowUp,
+  addLeadNote,
 } from '../services';
 
 export class LeadController {
@@ -39,6 +41,24 @@ export class LeadController {
     try {
       const result = await updateLead(req.ctx, req.params.id, req.body);
       res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async addFollowUp(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await addLeadFollowUp(req.ctx, req.params.id, req.body);
+      res.status(201).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  public static async addNote(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await addLeadNote(req.ctx, req.params.id, req.body);
+      res.status(201).json(result);
     } catch (err) {
       next(err);
     }

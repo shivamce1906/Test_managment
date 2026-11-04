@@ -5,7 +5,8 @@ import { baseFieldsPlugin } from './plugins/baseFields.plugin';
 export interface IFeedback extends Document {
   businessId: Types.ObjectId;
   branchId: Types.ObjectId;
-  billId: Types.ObjectId;
+  billId?: Types.ObjectId;
+  appointmentId?: Types.ObjectId;
   customerId: Types.ObjectId;
   staffIds: Types.ObjectId[];
   rating: 1 | 2 | 3 | 4 | 5;
@@ -19,7 +20,8 @@ export interface IFeedback extends Document {
 const feedbackSchema = new Schema<IFeedback>(
   {
     branchId: { type: Schema.Types.ObjectId, ref: 'branches', required: true },
-    billId: { type: Schema.Types.ObjectId, ref: 'bills', required: true },
+    billId: { type: Schema.Types.ObjectId, ref: 'bills' },
+    appointmentId: { type: Schema.Types.ObjectId, ref: 'appointments' },
     customerId: { type: Schema.Types.ObjectId, ref: 'customers', required: true },
     staffIds: [{ type: Schema.Types.ObjectId, ref: 'staff' }],
     rating: { type: Number, enum: [1, 2, 3, 4, 5], required: true },
@@ -35,6 +37,7 @@ feedbackSchema.plugin(baseFieldsPlugin);
 feedbackSchema.plugin(tenantScopePlugin);
 
 feedbackSchema.index({ businessId: 1, branchId: 1, createdAt: -1 });
-feedbackSchema.index({ businessId: 1, billId: 1 }, { unique: true });
+feedbackSchema.index({ businessId: 1, billId: 1 }, { unique: true, sparse: true });
+feedbackSchema.index({ businessId: 1, appointmentId: 1 }, { unique: true, sparse: true });
 
 export const Feedback = model<IFeedback>('feedback', feedbackSchema);

@@ -10,7 +10,7 @@ const MONGO_URI = env.MONGODB_URI;
 async function bootstrap() {
   try {
     logger.info('Connecting to database...');
-    console.log("connection string", MONGO_URI)
+    
     await connectDb(MONGO_URI);
     logger.info('Database connected successfully');
 
@@ -28,6 +28,23 @@ async function bootstrap() {
     const app = createApp();
     const server = app.listen(PORT, async () => {
       logger.info({ port: PORT }, `Glox Salon API server running on port ${PORT}`);
+
+      // Initialize real-time WebSocket gateway for frontend management dashboard
+      try {
+        const { initSocketServer } = await import('./socket');
+        initSocketServer(server);
+      } catch (socketErr) {
+        logger.warn({ err: socketErr }, 'Notice: WebSocket server failed to initialize');
+      }
+
+      // Reopen every business's live WhatsApp connection (they were lost on each restart)
+      try {
+        const { reconnectAllWaNumbers } = await import('./services/whatsapp.service');
+        const count = await reconnectAllWaNumbers();
+        logger.info({ count }, 'WhatsApp numbers reconnected to Instant Broadcast');
+      } catch (waErr) {
+        logger.warn({ err: waErr }, 'Notice: WhatsApp numbers could not be reconnected');
+      }
 
       // Auto-start background workers (Point 4: Process PDF, WhatsApp & Day-End queues automatically)
       if (process.env.RUN_STANDALONE_WORKER !== 'true') {

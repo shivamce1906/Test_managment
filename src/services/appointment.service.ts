@@ -25,8 +25,8 @@ import {
 } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { auditService } from './audit.service';
-import { sendAppointmentFeedbackMessage } from './whatsapp.service';
-// import { notificationService } from './notification.service'
+import { sendAppointmentFeedbackMessage, sendBookingConfirmationMessage } from './whatsapp.service';
+import { notificationService } from './notification.service';
 
 // 'billed' is never set by hand: saving a bill with appointmentId moves the appointment there
 const VALID_TRANSITIONS: Record<string, string[]> = {
@@ -294,7 +294,7 @@ export class AppointmentService {
     const businessId = toObjectId(ctx.businessId!);
     const branchId = toObjectId(branchIdStr);
 
-    return withTransaction(async (session) => {
+    const appointment = await withTransaction(async (session) => {
       // 1. Resolve Customer
       let customerId: Types.ObjectId;
       if (data.customerId) {
@@ -330,7 +330,7 @@ export class AppointmentService {
       const maxEnd = new Date(Math.max(...lines.map((l) => l.end.getTime())));
       const businessDate = getBusinessDate(minStart);
 
-      const appointment = new Appointment({
+      const appt = new Appointment({
         businessId,
         branchId,
         customerId,
@@ -351,20 +351,33 @@ export class AppointmentService {
         notes: data.notes,
       });
 
-      await appointment.save({ session });
+      await appt.save({ session });
 
       await auditService.logAction({
         ctx,
         action: 'appointment.create',
         entity: 'appointment',
-        entityId: appointment._id,
+        entityId: appt._id,
         branchId,
         after: { customerId, businessDate, linesCount: lines.length },
         session,
       });
 
-      return appointment;
+      return appt;
     });
+
+    await notificationService.bumpScope(
+      businessId.toString(),
+      `appointments:${appointment.branchId.toString()}:${appointment.businessDate}`
+    );
+
+    try {
+      await sendBookingConfirmationMessage(appointment._id);
+    } catch (err) {
+      logger.error({ err, appointmentId: appointment._id }, 'Failed to trigger booking confirmation message');
+    }
+
+    return appointment;
   }
 
   /**
@@ -377,48 +390,63 @@ export class AppointmentService {
     data: { lines?: { serviceId: string; staffId?: string; start: string }[]; notes?: string; __v: number }
   ): Promise<IAppointment> {
     const businessId = toObjectId(ctx.businessId!);
+    let prevDate: string | null = null;
 
-    return withTransaction(async (session) => {
-      const appointment = await Appointment.findOne({ _id: toObjectId(id), businessId }).session(session);
-      if (!appointment) {
+    const appointment = await withTransaction(async (session) => {
+      const appt = await Appointment.findOne({ _id: toObjectId(id), businessId }).session(session);
+      if (!appt) {
         throw new AppError(404, 'NOT_FOUND', 'Appointment not found');
       }
-      assertBranchScope(ctx, appointment.branchId);
-      if (appointment.__v !== data.__v) {
+      assertBranchScope(ctx, appt.branchId);
+      if (appt.__v !== data.__v) {
         throw new AppError(409, 'VERSION_CONFLICT', 'The appointment was changed by someone else; reload and try again');
       }
-      if (!['booked', 'confirmed'].includes(appointment.status)) {
-        throw new AppError(422, 'INVALID_TRANSITION', `A ${appointment.status} appointment cannot be rescheduled`);
+      if (!['booked', 'confirmed'].includes(appt.status)) {
+        throw new AppError(422, 'INVALID_TRANSITION', `A ${appt.status} appointment cannot be rescheduled`);
       }
 
-      const { start: prevStart, end: prevEnd, lines: prevLines } = appointment.toObject();
+      prevDate = appt.businessDate;
+      const { start: prevStart, end: prevEnd, lines: prevLines } = appt.toObject();
       const before = { start: prevStart, end: prevEnd, lines: prevLines };
 
       if (data.lines) {
-        const lines = await this.buildLines(businessId, appointment.branchId, data.lines, session, appointment._id);
-        appointment.lines = lines as any;
-        appointment.start = new Date(Math.min(...lines.map((l) => l.start.getTime())));
-        appointment.end = new Date(Math.max(...lines.map((l) => l.end.getTime())));
-        appointment.businessDate = getBusinessDate(appointment.start);
-        appointment.statusLog.push({ status: appointment.status, at: new Date(), by: toObjectId(ctx.userId), reason: 'Rescheduled' });
+        const lines = await this.buildLines(businessId, appt.branchId, data.lines, session, appt._id);
+        appt.lines = lines as any;
+        appt.start = new Date(Math.min(...lines.map((l) => l.start.getTime())));
+        appt.end = new Date(Math.max(...lines.map((l) => l.end.getTime())));
+        appt.businessDate = getBusinessDate(appt.start);
+        appt.statusLog.push({ status: appt.status, at: new Date(), by: toObjectId(ctx.userId), reason: 'Rescheduled' });
       }
-      if (data.notes !== undefined) appointment.notes = data.notes;
+      if (data.notes !== undefined) appt.notes = data.notes;
 
-      await appointment.save({ session }); // optimisticConcurrency bumps __v
+      await appt.save({ session }); // optimisticConcurrency bumps __v
 
       await auditService.logAction({
         ctx,
         action: 'appointment.reschedule',
         entity: 'appointment',
-        entityId: appointment._id,
-        branchId: appointment.branchId,
+        entityId: appt._id,
+        branchId: appt.branchId,
         before,
-        after: { start: appointment.start, end: appointment.end, notes: appointment.notes },
+        after: { start: appt.start, end: appt.end, notes: appt.notes },
         session,
       });
 
-      return appointment;
+      return appt;
     });
+
+    await notificationService.bumpScope(
+      businessId.toString(),
+      `appointments:${appointment.branchId.toString()}:${appointment.businessDate}`
+    );
+    if (prevDate && prevDate !== appointment.businessDate) {
+      await notificationService.bumpScope(
+        businessId.toString(),
+        `appointments:${appointment.branchId.toString()}:${prevDate}`
+      );
+    }
+
+    return appointment;
   }
 
   /**
@@ -610,10 +638,16 @@ export class AppointmentService {
       after: { status: newStatus, reason },
     });
 
-    // await notificationService.bumpScope(
-    //   businessId.toString(),
-    //   `appointments:${appointment.branchId.toString()}:${appointment.businessDate}`
-    // );
+    await notificationService.bumpScope(
+      businessId.toString(),
+      `appointments:${appointment.branchId.toString()}:${appointment.businessDate}`
+    );
+
+    try {
+      await sendBookingConfirmationMessage(appointment._id);
+    } catch (err) {
+      logger.error({ err, appointmentId: appointment._id }, 'Failed to trigger booking confirmation message');
+    }
 
     return appointment;
   }

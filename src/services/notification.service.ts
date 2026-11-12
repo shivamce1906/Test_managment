@@ -1,5 +1,5 @@
 import { Types } from 'mongoose';
-import { Notification } from '../models';
+import { Notification, Branch } from '../models';
 import { AppError, ErrorCode, logger } from '../utils';
 import { RequestContext } from './context';
 import { getRedisClient } from '../integrations';
@@ -100,6 +100,26 @@ export async function getChanges(
 ) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
+  }
+
+  for (const scope of scopes) {
+    const parts = scope.split(':');
+    const branchPart = parts.find((p) => Types.ObjectId.isValid(p));
+    if (branchPart) {
+      if (ctx.role !== 'owner' && ctx.role !== 'super_admin' && ctx.role !== 'superadmin') {
+        const allowed = ctx.branchIds.includes(branchPart) || ctx.branchId === branchPart;
+        if (!allowed) {
+          throw new AppError(403, ErrorCode.CROSS_BRANCH_FORBIDDEN, 'Access denied to requested branch scope');
+        }
+      }
+      const exists = await Branch.exists({
+        _id: new Types.ObjectId(branchPart),
+        businessId: new Types.ObjectId(ctx.businessId),
+      });
+      if (!exists) {
+        throw new AppError(403, ErrorCode.CROSS_BRANCH_FORBIDDEN, 'Access denied to requested branch scope');
+      }
+    }
   }
 
   const redis = getRedisClient();

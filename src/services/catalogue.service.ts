@@ -439,25 +439,41 @@ export class CatalogueService {
   /**
    * Bulk price change preview and apply.
    */
+  private computeBulkPriceTransition(svc: IService, changeBps: number, branchId?: string) {
+    let oldPrice = svc.basePricePaise;
+    if (branchId) {
+      const bp = svc.branchPrices.find((p) => p.branchId.toString() === branchId);
+      if (bp && bp.pricePaise !== undefined && bp.pricePaise !== null) {
+        oldPrice = bp.pricePaise;
+      }
+    }
+    const delta = Math.round((oldPrice * changeBps) / 10000);
+    const newPrice = Math.max(0, oldPrice + delta);
+    return {
+      serviceId: svc._id,
+      name: svc.name,
+      oldPricePaise: oldPrice,
+      newPricePaise: newPrice,
+      changeBps,
+    };
+  }
+
   async previewBulkPriceChange(
     ctx: RequestContext,
     categoryId: string,
     changeBps: number,
     branchId?: string
   ): Promise<any[]> {
-    const services = await this.getServices(ctx, { categoryId, branchId });
-    return services.map((svc) => {
-      const oldPrice = svc.effectivePricePaise;
-      const delta = Math.round((oldPrice * changeBps) / 10000);
-      const newPrice = Math.max(0, oldPrice + delta);
-      return {
-        serviceId: svc._id,
-        name: svc.name,
-        oldPricePaise: oldPrice,
-        newPricePaise: newPrice,
-        changeBps,
-      };
-    });
+    if (!hasPermission(ctx, 'manageCatalogue')) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can preview bulk price changes');
+    }
+    if (branchId && ctx.role === 'manager' && !ctx.branchIds.includes(branchId)) {
+      throw new AppError(403, 'FORBIDDEN', 'You can only manage prices for your own branches');
+    }
+
+    const businessId = toObjectId(ctx.businessId!);
+    const services = await Service.find({ businessId, categoryId: toObjectId(categoryId) }).sort({ name: 1 });
+    return services.map((svc) => this.computeBulkPriceTransition(svc, changeBps, branchId));
   }
 
   async applyBulkPriceChange(
@@ -465,40 +481,36 @@ export class CatalogueService {
     categoryId: string,
     changeBps: number,
     branchId?: string
-  ): Promise<{ updatedCount: number }> {
+  ): Promise<{ updatedCount: number; changes: any[] }> {
     if (!hasPermission(ctx, 'manageCatalogue')) {
       throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can apply bulk price changes');
     }
+    if (branchId && ctx.role === 'manager' && !ctx.branchIds.includes(branchId)) {
+      throw new AppError(403, 'FORBIDDEN', 'You can only manage prices for your own branches');
+    }
 
     const businessId = toObjectId(ctx.businessId!);
-    const services = await Service.find({ businessId, categoryId: toObjectId(categoryId) });
+    const services = await Service.find({ businessId, categoryId: toObjectId(categoryId) }).sort({ name: 1 });
+    const changes: any[] = [];
 
     for (const svc of services) {
+      const transition = this.computeBulkPriceTransition(svc, changeBps, branchId);
       if (branchId) {
-        // Update specific branch
         const bpIdx = svc.branchPrices.findIndex((p) => p.branchId.toString() === branchId);
-        const currentPrice = bpIdx >= 0 && svc.branchPrices[bpIdx].pricePaise !== undefined
-          ? svc.branchPrices[bpIdx].pricePaise!
-          : svc.basePricePaise;
-
-        const delta = Math.round((currentPrice * changeBps) / 10000);
-        const newPrice = Math.max(0, currentPrice + delta);
-
         if (bpIdx >= 0) {
-          svc.branchPrices[bpIdx].pricePaise = newPrice;
+          svc.branchPrices[bpIdx].pricePaise = transition.newPricePaise;
         } else {
           svc.branchPrices.push({
             branchId: toObjectId(branchId),
-            pricePaise: newPrice,
+            pricePaise: transition.newPricePaise,
             active: true,
           });
         }
       } else {
-        // Update base price
-        const delta = Math.round((svc.basePricePaise * changeBps) / 10000);
-        svc.basePricePaise = Math.max(0, svc.basePricePaise + delta);
+        svc.basePricePaise = transition.newPricePaise;
       }
       await svc.save();
+      changes.push(transition);
     }
 
     await auditService.logAction({
@@ -509,7 +521,7 @@ export class CatalogueService {
       after: { categoryId, changeBps, branchId, count: services.length },
     });
 
-    return { updatedCount: services.length };
+    return { updatedCount: services.length, changes };
   }
 
   // --- PRODUCTS ---

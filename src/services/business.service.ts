@@ -5,6 +5,7 @@ import {
   BranchRequest,
   User,
   EmailRegistry,
+  Automation,
   withTransaction,
   IBusiness,
   IBranch,
@@ -165,6 +166,30 @@ export class BusinessService {
           { _id: ownerEmail, kind: 'tenant', businessId, userId: owner._id },
           { _id: branchEmail, kind: 'tenant', businessId, userId: branchLogin._id },
         ],
+        { session }
+      );
+
+      // 6. Seed all 11 default Automation entries (disabled until owner enables & assigns templates)
+      const AUTOMATION_KEYS = [
+        'booking_confirmation',
+        'reminder_24h',
+        'reminder_2h',
+        'rebooking',
+        'birthday',
+        'anniversary',
+        'winback',
+        'feedback',
+        'review_push',
+        'membership_expiry',
+        'package_last_session',
+      ] as const;
+      await Automation.insertMany(
+        AUTOMATION_KEYS.map((key) => ({
+          businessId,
+          key,
+          enabled: false,
+          settings: {},
+        })),
         { session }
       );
 

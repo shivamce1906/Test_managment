@@ -1,6 +1,7 @@
 import { Worker, Job } from 'bullmq';
 import { Types } from 'mongoose';
-import { getBullConnection, sendInstantBroadcastMessage, fetchInstantBroadcastTemplates } from '../../integrations';
+import ExcelJS from 'exceljs';
+import { getBullConnection, sendInstantBroadcastMessage, fetchInstantBroadcastTemplates, s3Adapter } from '../../integrations';
 import {
   WaMessage,
   WaNumber,
@@ -8,15 +9,46 @@ import {
   WaConversation,
   Campaign,
   Customer,
+  Business,
+  User,
+  Notification,
   MarketingOffer,
   MarketingSegment,
   AutomationSend,
 } from '../../models';
-import { logger, decrypt } from '../../utils';
+import { logger, decrypt, getBusinessDate, normalizePhone } from '../../utils';
 import { toObjectId } from '../../services';
 import { segmentationService } from '../../services/segmentation.service';
 import { defaultChatBranchId } from '../../services/whatsapp.service';
-import { whatsappSendQueue } from '../queues';
+import { whatsappSendQueue, campaignSendQueue } from '../queues';
+
+function parseClockMinutes(hhmm: string | undefined, fallback: number): number {
+  if (!hhmm || !/^\d{1,2}:\d{2}$/.test(hhmm)) return fallback;
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function getIstClockMinutes(now: Date = new Date()): number {
+  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+  return ist.getUTCHours() * 60 + ist.getUTCMinutes();
+}
+
+function isQuietHoursIst(guards?: { quietStart?: string; quietEnd?: string }, now: Date = new Date()): boolean {
+  const startMin = parseClockMinutes(guards?.quietStart, 21 * 60);
+  const endMin = parseClockMinutes(guards?.quietEnd, 9 * 60);
+  const curMin = getIstClockMinutes(now);
+  if (startMin > endMin) {
+    return curMin >= startMin || curMin < endMin;
+  }
+  return curMin >= startMin && curMin < endMin;
+}
+
+function msUntilQuietEndIst(guards?: { quietStart?: string; quietEnd?: string }, now: Date = new Date()): number {
+  const endMin = parseClockMinutes(guards?.quietEnd, 9 * 60);
+  const curMin = getIstClockMinutes(now);
+  const diffMin = curMin < endMin ? endMin - curMin : 24 * 60 - curMin + endMin;
+  return Math.max(60 * 1000, diffMin * 60 * 1000);
+}
 
 export function createWhatsAppWorker(): Worker {
   const connection = getBullConnection();
@@ -27,7 +59,7 @@ export function createWhatsAppWorker(): Worker {
       const { messageId } = job.data;
       logger.info({ jobId: job.id, messageId }, 'Processing whatsapp-send job');
 
-      const message = await WaMessage.findById(messageId);
+      const message = await WaMessage.findById(messageId).setOptions({ skipTenantScope: true });
       if (!message) {
         logger.warn({ messageId }, 'WaMessage not found for job');
         return;
@@ -38,7 +70,7 @@ export function createWhatsAppWorker(): Worker {
         return;
       }
 
-      const conversation = await WaConversation.findById(message.conversationId);
+      const conversation = await WaConversation.findById(message.conversationId).setOptions({ skipTenantScope: true });
       if (!conversation) {
         logger.warn({ conversationId: message.conversationId }, 'Conversation not found for message');
         return;
@@ -65,8 +97,11 @@ export function createWhatsAppWorker(): Worker {
       try {
         let templateName: string | undefined;
         if (message.templateId) {
-          const tpl = await WaTemplate.findById(message.templateId);
+          const tpl = await WaTemplate.findById(message.templateId).setOptions({ skipTenantScope: true });
           if (tpl) templateName = tpl.name;
+        }
+        if (message.kind === 'template' && !templateName && message.origin === 'transactional') {
+          templateName = 'day_end_report';
         }
 
         const response = await sendInstantBroadcastMessage({
@@ -80,6 +115,29 @@ export function createWhatsAppWorker(): Worker {
           variables: message.variables,
           mediaUrl: message.mediaKey ? `https://storage.glox.io/${message.mediaKey}` : undefined,
         });
+
+        if (response.lowBalance) {
+          numberDoc.lowBalance = true;
+          await numberDoc.save();
+          await Campaign.updateMany(
+            {
+              businessId: message.businessId,
+              numberId: numberDoc._id,
+              status: { $in: ['scheduled', 'sending'] },
+            },
+            { $set: { status: 'paused' } }
+          );
+          const owner = await User.findOne({ businessId: message.businessId, role: 'owner', status: 'active' });
+          if (owner) {
+            await Notification.create({
+              businessId: message.businessId,
+              userId: owner._id,
+              type: 'wa_low_balance',
+              title: 'WhatsApp Balance Low',
+              body: 'Your WhatsApp messaging balance is low. Active campaigns have been paused.',
+            });
+          }
+        }
 
         // Rejected by Instant Broadcast or Meta: retrying would fail the same way
         if (!response.success) {
@@ -110,6 +168,52 @@ export function createWhatsAppWorker(): Worker {
   return worker;
 }
 
+async function resolveUploadedAudienceCustomerIds(businessId: Types.ObjectId, uploadKey: string): Promise<Types.ObjectId[]> {
+  try {
+    const buffer = await s3Adapter.getObject(uploadKey);
+    if (!buffer || buffer.length === 0) return [];
+    const phones: string[] = [];
+    const textPreview = buffer.slice(0, 64).toString('utf8');
+    if (textPreview.includes(',') || textPreview.includes('\n')) {
+      for (const line of buffer.toString('utf8').split(/\r?\n/)) {
+        const firstCol = line.split(',')[0]?.trim();
+        if (!firstCol || /phone/i.test(firstCol)) continue;
+        try {
+          phones.push(normalizePhone(firstCol));
+        } catch {
+          // ignore invalid row
+        }
+      }
+    } else {
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer as any);
+      const sheet = workbook.worksheets[0];
+      if (sheet) {
+        sheet.eachRow((row, rowNumber) => {
+          if (rowNumber === 1) return;
+          const raw = (row.values as any[])[1];
+          if (!raw) return;
+          try {
+            phones.push(normalizePhone(String(raw)));
+          } catch {
+            // ignore invalid row
+          }
+        });
+      }
+    }
+    if (phones.length === 0) return [];
+    return Customer.find({
+      businessId,
+      phone: { $in: phones },
+      doNotMessage: { $ne: true },
+      waOptIn: { $ne: false },
+    }).distinct('_id');
+  } catch (err) {
+    logger.warn({ err, uploadKey }, 'Failed to resolve uploaded campaign audience');
+    return [];
+  }
+}
+
 export function createCampaignWorker(): Worker {
   const connection = getBullConnection();
 
@@ -121,23 +225,39 @@ export function createCampaignWorker(): Worker {
       const cId = toObjectId(campaignId);
 
       const campaign = await Campaign.findOne({ _id: cId, businessId: bId });
-      if (!campaign || campaign.status === 'completed' || campaign.status === 'cancelled') {
+      if (!campaign || ['completed', 'cancelled', 'paused'].includes(campaign.status)) {
+        return;
+      }
+
+      // Pause if number is missing or flagged for low balance
+      const campaignNumber = await WaNumber.findOne({ _id: campaign.numberId, businessId: bId, status: 'active' });
+      if (!campaignNumber || campaignNumber.lowBalance) {
+        campaign.status = 'paused';
+        await campaign.save();
+        return;
+      }
+
+      const business = await Business.findById(bId);
+      const now = new Date();
+      if (isQuietHoursIst(business?.automationGuards, now)) {
+        const delayMs = msUntilQuietEndIst(business?.automationGuards, now);
+        logger.info({ campaignId, delayMs }, 'Campaign send deferred due to quiet hours (IST)');
+        campaign.status = 'scheduled';
+        await campaign.save();
+        try {
+          await campaignSendQueue().add(
+            'send',
+            { campaignId: campaign._id.toString(), businessId: bId.toString() },
+            { delay: delayMs, jobId: `campaign:${campaign._id}:resume:${Date.now()}` }
+          );
+        } catch (err) {
+          logger.warn({ err, campaignId }, 'Could not re-queue campaign after quiet hours');
+        }
         return;
       }
 
       campaign.status = 'sending';
       await campaign.save();
-
-      // Check quiet hours (allowed 09:00 - 21:00 IST)
-      const now = new Date();
-      const istHours = new Date(now.getTime() + 5.5 * 60 * 60 * 1000).getUTCHours();
-      if (istHours < 9 || istHours >= 21) {
-        logger.info({ campaignId, istHours }, 'Campaign send deferred due to quiet hours (09:00-21:00 IST)');
-        // Calculate delay until 09:00 IST
-        campaign.status = 'scheduled';
-        await campaign.save();
-        return;
-      }
 
       // Load linked offer if exists
       let offer: any = null;
@@ -169,10 +289,9 @@ export function createCampaignWorker(): Worker {
           doNotMessage: { $ne: true },
           waOptIn: { $ne: false },
         }).distinct('_id');
+      } else if (campaign.audience?.kind === 'upload' && campaign.audience.uploadKey) {
+        customerIds = await resolveUploadedAudienceCustomerIds(bId, campaign.audience.uploadKey);
       }
-
-      // New chats go to the number's branch (or the head branch), so branch logins can see them
-      const campaignNumber = await WaNumber.findOne({ _id: campaign.numberId, businessId: bId }).select('branchIds');
 
       const customers = await Customer.find({
         _id: { $in: customerIds },
@@ -180,15 +299,30 @@ export function createCampaignWorker(): Worker {
         phone: { $exists: true, $ne: '' },
       }).limit(5000);
 
+      const todayIst = getBusinessDate(now);
+      const maxMarketingPerDay = business?.automationGuards?.maxMarketingPerDay ?? 1;
       let count = 0;
 
       for (const cust of customers) {
         if (!cust.phone) continue;
 
-        // Daily marketing cap guard (max 1 marketing message per customer per day)
+        // Respect pause if owner paused mid-run
+        const latestCampaign = await Campaign.findOne({ _id: cId, businessId: bId }).select('status');
+        if (!latestCampaign || latestCampaign.status === 'paused' || latestCampaign.status === 'cancelled') {
+          return;
+        }
+
+        // Campaign dedupe
         const dedupeKey = `mkt:${cId}:${cust._id}`;
         const alreadySent = await AutomationSend.findById(dedupeKey);
         if (alreadySent) continue;
+
+        // Business-wide daily marketing cap guard
+        const dailyCapCount = await AutomationSend.countDocuments({
+          businessId: bId,
+          _id: { $regex: `^mktcap:${cust._id}:${todayIst}:` },
+        });
+        if (dailyCapCount >= maxMarketingPerDay) continue;
 
         // Upsert conversation
         let conversation = await WaConversation.findOne({
@@ -252,6 +386,12 @@ export function createCampaignWorker(): Worker {
           messageId: msg._id,
           at: new Date(),
         });
+        await AutomationSend.create({
+          _id: `mktcap:${cust._id}:${todayIst}:${msg._id}`,
+          businessId: bId,
+          messageId: msg._id,
+          at: new Date(),
+        });
 
         await whatsappSendQueue().add(
           'send',
@@ -261,9 +401,8 @@ export function createCampaignWorker(): Worker {
         count++;
       }
 
-      campaign.status = 'completed';
       campaign.stats = campaign.stats || {
-        total: count,
+        total: customers.length,
         excluded: 0,
         sent: 0,
         delivered: 0,
@@ -272,6 +411,7 @@ export function createCampaignWorker(): Worker {
         costPaise: 0,
       };
       campaign.stats.sent = count;
+      campaign.status = count > 0 ? 'completed' : 'failed';
       await campaign.save();
     },
     { connection: connection as any, concurrency: 2 }

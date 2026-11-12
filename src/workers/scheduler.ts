@@ -8,78 +8,77 @@ import {
   dayEndReportQueue,
 } from './queues';
 import { logger } from '../utils';
-import { Business } from '../models';
 
 export async function setupSchedulers(): Promise<void> {
-  logger.info('Initializing BullMQ recurring job schedules...');
+  logger.info('Initializing BullMQ recurring job schedules (Asia/Kolkata)...');
 
   // Automation scan every 15 minutes
   await automationScanQueue().upsertJobScheduler(
     'automation-scan-scheduler',
-    { pattern: '*/15 * * * *' },
+    { pattern: '*/15 * * * *', tz: 'Asia/Kolkata' },
     {
       name: 'scan',
-      data: { slot: new Date().toISOString() },
+      data: { scheduled: true },
     }
   );
 
-  // Plan expiry at 00:30
+  // Plan expiry at 00:30 IST
   await planExpiryQueue().upsertJobScheduler(
     'plan-expiry-scheduler',
-    { pattern: '30 0 * * *' },
+    { pattern: '30 0 * * *', tz: 'Asia/Kolkata' },
     {
       name: 'expire',
-      data: { date: new Date().toISOString().split('T')[0] },
+      data: {},
     }
   );
 
-  // Daily summary rebuild at 02:00
+  // Daily summary rebuild at 02:00 IST
   await dailySummaryQueue().upsertJobScheduler(
     'daily-summary-scheduler',
-    { pattern: '0 2 * * *' },
+    { pattern: '0 2 * * *', tz: 'Asia/Kolkata' },
     {
       name: 'rebuild',
-      data: { date: new Date().toISOString().split('T')[0] },
+      data: {},
     }
   );
 
-  // Ledger check at 03:00
+  // Ledger check at 03:00 IST
   await ledgerCheckQueue().upsertJobScheduler(
     'ledger-check-scheduler',
-    { pattern: '0 3 * * *' },
+    { pattern: '0 3 * * *', tz: 'Asia/Kolkata' },
     {
       name: 'verify',
-      data: { date: new Date().toISOString().split('T')[0] },
+      data: {},
     }
   );
 
-  // Recurring expense at 06:00
+  // Recurring expense at 06:00 IST
   await recurringExpenseQueue().upsertJobScheduler(
     'recurring-expense-scheduler',
-    { pattern: '0 6 * * *' },
+    { pattern: '0 6 * * *', tz: 'Asia/Kolkata' },
     {
       name: 'generate',
-      data: { date: new Date().toISOString().split('T')[0] },
+      data: {},
     }
   );
 
-  // Stock alerts at 23:00
+  // Stock alerts at 23:00 IST
   await stockAlertsQueue().upsertJobScheduler(
     'stock-alerts-scheduler',
-    { pattern: '0 23 * * *' },
+    { pattern: '0 23 * * *', tz: 'Asia/Kolkata' },
     {
       name: 'check',
-      data: { date: new Date().toISOString().split('T')[0] },
+      data: {},
     }
   );
 
-  // Day-End report at 23:00 (11:00 PM) daily
+  // Day-End report dispatcher every 15 minutes IST so each business receives its report at its configured dayEndReportTime
   await dayEndReportQueue().upsertJobScheduler(
     'day-end-report-scheduler',
-    { pattern: '0 23 * * *' },
+    { pattern: '*/15 * * * *', tz: 'Asia/Kolkata' },
     {
       name: 'report',
-      data: { date: new Date().toISOString().split('T')[0] },
+      data: { scheduled: true },
     }
   );
 

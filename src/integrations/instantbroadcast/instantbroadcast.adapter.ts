@@ -133,28 +133,70 @@ export class InstantBroadcastAdapter {
   }
 
   /**
+   * Verifies that live Instant Broadcast credentials can authenticate against the API.
+   */
+  async verifyConnection(userToken?: string, uid?: string): Promise<{ verified: boolean; unauthorized?: boolean; error?: string }> {
+    if (!userToken || userToken === 'mock-aisensy-key' || userToken === 'key' || userToken.startsWith('mock')) {
+      return { verified: true };
+    }
+    try {
+      const url = `${this.baseUrl}/api/v1/templates?token=${encodeURIComponent(userToken)}`;
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${userToken}`,
+          Accept: 'application/json',
+          ...(uid ? { 'X-Account-UID': uid } : {}),
+        },
+      });
+      if (response.status === 401 || response.status === 403) {
+        return { verified: false, unauthorized: true, error: `Instant Broadcast rejected credentials (HTTP ${response.status})` };
+      }
+      const contentType = response.headers.get('content-type') || '';
+      if (!response.ok || !contentType.includes('application/json')) {
+        return { verified: false, error: `Unexpected response from Instant Broadcast (${response.status} ${contentType || 'unknown'})` };
+      }
+      return { verified: true };
+    } catch (err: any) {
+      return { verified: false, error: err.message || 'Instant Broadcast connection check failed' };
+    }
+  }
+
+  /**
    * Sync approved templates from Instant Broadcast for a user account / UID.
    */
   async syncTemplates(userToken?: string, uid?: string): Promise<any[]> {
     logger.info({ uid }, 'Syncing WhatsApp templates from Instant Broadcast');
 
     if (userToken && userToken !== 'mock-aisensy-key' && userToken !== 'key' && !userToken.startsWith('mock')) {
-      try {
-        const response = await fetch(`${this.baseUrl}/api/v1/templates`, {
-          headers: {
-            Authorization: `Bearer ${userToken}`,
-            ...(uid ? { 'X-Account-UID': uid } : {}),
-          },
-        });
-        if (response.ok) {
-          const data: any = await response.json();
-          if (Array.isArray(data.templates || data)) {
-            return data.templates || data;
+      const candidateUrls = [
+        `${this.baseUrl}/api/v1/templates?token=${encodeURIComponent(userToken)}`,
+        `${this.baseUrl}/api/v1/get_templets?token=${encodeURIComponent(userToken)}`,
+      ];
+      for (const url of candidateUrls) {
+        try {
+          const response = await fetch(url, {
+            headers: {
+              Authorization: `Bearer ${userToken}`,
+              Accept: 'application/json',
+              ...(uid ? { 'X-Account-UID': uid } : {}),
+            },
+          });
+          const contentType = response.headers.get('content-type') || '';
+          if (!contentType.includes('application/json')) {
+            logger.warn({ url, status: response.status, contentType }, 'Instant Broadcast template endpoint returned non-JSON (HTML/login)');
+            continue;
           }
+          if (response.ok) {
+            const data: any = await response.json();
+            const list = Array.isArray(data) ? data : data.templates || data.data;
+            if (Array.isArray(list)) {
+              return list;
+            }
+          }
+          logger.warn({ url, status: response.status }, 'Instant Broadcast did not return a template list');
+        } catch (err: any) {
+          logger.warn({ url, err: err.message }, 'Failed to fetch templates from live Instant Broadcast endpoint');
         }
-        logger.warn({ status: response.status }, 'Instant Broadcast did not return a template list');
-      } catch (err: any) {
-        logger.warn({ err: err.message }, 'Failed to fetch templates from live Instant Broadcast endpoint');
       }
       // A live account never gets the sample templates below: Meta would reject them
       return [];
@@ -208,6 +250,14 @@ export class InstantBroadcastAdapter {
         category: 'marketing',
         body: 'Thank you for your rating {{1}}! Please take a moment to leave us a Google review: {{2}}',
         variables: ['name', 'review_url'],
+        status: 'approved',
+      },
+      {
+        name: 'day_end_report',
+        language: 'en',
+        category: 'utility',
+        body: 'Day-end summary for {{1}} on {{2}} ({{3}}): Net ₹{{4}}, Cash ₹{{5}}, UPI ₹{{6}}, Bills {{7}}.',
+        variables: ['branch', 'date', 'status', 'net_sales', 'cash', 'upi', 'bills'],
         status: 'approved',
       },
     ];

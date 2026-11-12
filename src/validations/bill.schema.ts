@@ -68,6 +68,7 @@ export const createBillSchema = z.object({
 
 // Edit: lines are re-sent in full; payments/tips/billDiscount left out keep their current values
 export const editBillSchema = z.object({
+  customerId: objectIdSchema.optional(),
   lines: z.array(billLineInputSchema).min(1, 'At least one line is required'),
   billDiscount: billDiscountInputSchema.nullable().optional(),
   redemptions: z.array(redemptionInputSchema).optional(),

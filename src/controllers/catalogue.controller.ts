@@ -104,6 +104,35 @@ export class CatalogueController {
       next(err);
     }
   };
+
+  public reorderCategories = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      await this.catalogueService.reorderCategories(req.ctx, req.body.orders);
+      res.json({ success: true });
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  public previewBulkPriceChange = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { categoryId, changeBps, branchId } = req.body;
+      const result = await this.catalogueService.previewBulkPriceChange(req.ctx, categoryId, changeBps, branchId);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  public applyBulkPriceChange = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { categoryId, changeBps, branchId } = req.body;
+      const result = await this.catalogueService.applyBulkPriceChange(req.ctx, categoryId, changeBps, branchId);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
 }
 
 export const catalogueController = new CatalogueController();

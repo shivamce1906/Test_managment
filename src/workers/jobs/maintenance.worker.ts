@@ -9,18 +9,18 @@ import {
   Product,
   StockBalance,
   Notification,
+  User,
 } from '../../models';
-import { logger } from '../../utils';
-import { toObjectId } from '../../services';
+import { logger, getBusinessDate, getDaysInMonth } from '../../utils';
 
 export function createPlanExpiryWorker(): Worker {
   const connection = getBullConnection();
 
   return new Worker(
     'plan-expiry',
-    async (job: Job<{ date: string }>) => {
-      logger.info({ date: job.data.date }, 'Running plan-expiry job');
-      const todayDateStr = job.data.date || new Date().toISOString().split('T')[0];
+    async (job: Job<{ date?: string }>) => {
+      const todayDateStr = job.data?.date || getBusinessDate();
+      logger.info({ date: todayDateStr }, 'Running plan-expiry job');
 
       // Expire customer plans whose validTill is earlier than today
       const result = await CustomerPlan.updateMany(
@@ -31,7 +31,7 @@ export function createPlanExpiryWorker(): Worker {
         {
           $set: { status: 'expired' },
         }
-      );
+      ).setOptions({ skipTenantScope: true });
 
       logger.info({ expiredCount: result.modifiedCount }, 'Customer plans expired');
     },
@@ -44,21 +44,25 @@ export function createRecurringExpenseWorker(): Worker {
 
   return new Worker(
     'recurring-expense',
-    async (job: Job<{ date: string }>) => {
-      logger.info({ date: job.data.date }, 'Running recurring-expense job');
-      const now = new Date();
-      const currentDay = now.getDate();
-      const todayStr = job.data.date || now.toISOString().split('T')[0];
+    async (job: Job<{ date?: string }>) => {
+      const todayStr = job.data?.date || getBusinessDate();
+      logger.info({ date: todayStr }, 'Running recurring-expense job');
+
+      const [yearStr, monthStr, dayStr] = todayStr.split('-');
+      const currentDay = Number(dayStr);
+      const daysInMonth = getDaysInMonth(Number(yearStr), Number(monthStr));
       const currentMonthPrefix = todayStr.substring(0, 7);
 
+      const dayCondition = currentDay === daysInMonth ? { $gte: currentDay } : currentDay;
       const activeRules = await RecurringExpense.find({
         active: true,
-        dayOfMonth: currentDay,
-      });
+        dayOfMonth: dayCondition,
+      }).setOptions({ skipTenantScope: true });
 
       for (const rule of activeRules) {
         // Check if expense already posted for this month
         const existing = await Expense.findOne({
+          businessId: rule.businessId,
           recurringId: rule._id,
           businessDate: { $regex: `^${currentMonthPrefix}` },
         });
@@ -87,15 +91,15 @@ export function createStockAlertsWorker(): Worker {
 
   return new Worker(
     'stock-alerts',
-    async (job: Job<{ branchId?: string; date: string }>) => {
-      logger.info({ jobData: job.data }, 'Running stock-alerts job');
+    async (job: Job<{ branchId?: string; date?: string }>) => {
+      const todayDateStr = job.data?.date || getBusinessDate();
+      logger.info({ jobData: job.data, date: todayDateStr }, 'Running stock-alerts job');
 
-      const filter: any = { active: true };
-      const products = await Product.find(filter);
+      const products = await Product.find({ active: true }).setOptions({ skipTenantScope: true });
 
       for (const prod of products) {
         for (const rl of prod.reorderLevels || []) {
-          if (job.data.branchId && rl.branchId.toString() !== job.data.branchId) {
+          if (job.data?.branchId && rl.branchId.toString() !== job.data.branchId) {
             continue;
           }
 
@@ -107,10 +111,31 @@ export function createStockAlertsWorker(): Worker {
 
           const currentQty = balance ? balance.qty : 0;
           if (currentQty <= rl.qty) {
-            // Find an owner or manager to notify
+            // Find a real user (manager for branch, branch login, or owner) to notify
+            const recipient =
+              (await User.findOne({
+                businessId: prod.businessId,
+                role: 'manager',
+                branchIds: rl.branchId,
+                status: 'active',
+              })) ||
+              (await User.findOne({
+                businessId: prod.businessId,
+                role: 'branch',
+                branchLoginFor: rl.branchId,
+                status: 'active',
+              })) ||
+              (await User.findOne({
+                businessId: prod.businessId,
+                role: 'owner',
+                status: 'active',
+              }));
+
+            if (!recipient) continue;
+
             await Notification.create({
               businessId: prod.businessId,
-              userId: prod.businessId, // broadcast or business level
+              userId: recipient._id,
               type: 'low_stock',
               title: `Low Stock Alert: ${prod.name}`,
               body: `Current stock (${currentQty}) is at or below reorder level (${rl.qty}).`,
@@ -129,15 +154,19 @@ export function createLedgerCheckWorker(): Worker {
 
   return new Worker(
     'ledger-check',
-    async (job: Job<{ date: string }>) => {
-      logger.info({ date: job.data.date }, 'Running ledger-check job');
+    async (job: Job<{ date?: string }>) => {
+      const dateStr = job.data?.date || getBusinessDate();
+      logger.info({ date: dateStr }, 'Running ledger-check job');
 
-      const customers = await Customer.find({ walletBalancePaise: { $gt: 0 } }).limit(500);
+      const customers = await Customer.find({ walletBalancePaise: { $gt: 0 } })
+        .limit(500)
+        .setOptions({ skipTenantScope: true });
       for (const cust of customers) {
-        const txs = await WalletLedger.find({ customerId: cust._id });
+        const txs = await WalletLedger.find({ businessId: cust.businessId, customerId: cust._id });
         const computed = txs.reduce((acc: number, tx: any) => {
-          if (['topup', 'bonus', 'refund'].includes(tx.type)) return acc + tx.amountPaise;
+          if (['topup', 'bonus', 'refund', 'imported'].includes(tx.type)) return acc + tx.amountPaise;
           if (['redeem', 'reverse', 'expiry'].includes(tx.type)) return acc - tx.amountPaise;
+          if (tx.type === 'adjust') return acc + tx.amountPaise;
           return acc;
         }, 0);
 

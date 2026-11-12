@@ -18,7 +18,7 @@ export interface ICampaign extends Document {
   };
   variableMap: Record<string, string>;
   scheduledAt?: Date;
-  status: 'draft' | 'scheduled' | 'sending' | 'paused' | 'completed' | 'cancelled';
+  status: 'draft' | 'scheduled' | 'sending' | 'paused' | 'completed' | 'cancelled' | 'failed';
   stats: {
     total: number;
     excluded: number;
@@ -56,7 +56,7 @@ const campaignSchema = new Schema<ICampaign>(
     scheduledAt: { type: Date },
     status: {
       type: String,
-      enum: ['draft', 'scheduled', 'sending', 'paused', 'completed', 'cancelled'],
+      enum: ['draft', 'scheduled', 'sending', 'paused', 'completed', 'cancelled', 'failed'],
       default: 'draft',
       required: true,
     },

@@ -2,7 +2,31 @@ import { Request, Response, NextFunction } from 'express';
 import { Types } from 'mongoose';
 import { AuthService } from '../services';
 import { Business, Branch } from '../models';
+import { env } from '../config';
+import { AppError, ErrorCode } from '../utils';
 import type { RequestContext } from '../services/context';
+
+function getRefreshCookieOptions() {
+  return {
+    httpOnly: true,
+    sameSite: 'lax' as const,
+    secure: env.NODE_ENV === 'production',
+    path: '/auth',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  };
+}
+
+function extractCookie(cookieHeader: string | undefined, name: string): string | undefined {
+  if (!cookieHeader) return undefined;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === name) {
+      return decodeURIComponent(part.slice(idx + 1).trim());
+    }
+  }
+  return undefined;
+}
 
 /**
  * Read-only business rules every salon role needs (managers and branch logins cannot read
@@ -37,8 +61,8 @@ export class AuthController {
 
   public login = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '127.0.0.1';
       const result = await this.authService.login(req.body.email, req.body.password);
+      res.cookie('refreshToken', result.refreshToken, getRefreshCookieOptions());
       res.json(result);
     } catch (err) {
       next(err);
@@ -47,7 +71,12 @@ export class AuthController {
 
   public refresh = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const result = await this.authService.rotateRefreshToken(req.body.refreshToken);
+      const token = req.body?.refreshToken || extractCookie(req.headers.cookie, 'refreshToken');
+      if (!token) {
+        throw new AppError(401, ErrorCode.UNAUTHENTICATED, 'Refresh token is required');
+      }
+      const result = await this.authService.rotateRefreshToken(token);
+      res.cookie('refreshToken', result.refreshToken, getRefreshCookieOptions());
       res.json(result);
     } catch (err) {
       next(err);
@@ -56,10 +85,12 @@ export class AuthController {
 
   public logout = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const refreshToken = req.body?.refreshToken;
+      const refreshToken = req.body?.refreshToken || extractCookie(req.headers.cookie, 'refreshToken');
       if (refreshToken) {
         await this.authService.logout(refreshToken);
       }
+      const { maxAge: _maxAge, ...clearOpts } = getRefreshCookieOptions();
+      res.clearCookie('refreshToken', clearOpts);
       res.json({ success: true, message: 'Logged out successfully' });
     } catch (err) {
       next(err);

@@ -5,6 +5,7 @@ import {
   getMessages,
   sendMessage,
   syncWaTemplates,
+  getWaNumbers,
   getWaTemplates,
   createCampaign,
   getCampaigns,
@@ -17,6 +18,7 @@ import {
   findWaNumberForWebhook,
   webhookSecretMatches,
 } from '../services';
+import { AppError, ErrorCode } from '../utils';
 
 export class WhatsappController {
   public static async processWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -132,7 +134,19 @@ export class WhatsappController {
 
   public static async syncTemplates(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await syncWaTemplates(req.ctx, req.ctx.businessId!);
+      let numberId =
+        (req.params.numberId as string) ||
+        (req.body?.numberId as string) ||
+        (req.query.numberId as string);
+      if (!numberId) {
+        const numbers = await getWaNumbers(req.ctx);
+        const activeNum = numbers.find((n: any) => n.status === 'active') || numbers[0];
+        if (!activeNum) {
+          throw new AppError(404, ErrorCode.RESOURCE_NOT_FOUND, 'No WhatsApp number configured for this business');
+        }
+        numberId = activeNum._id.toString();
+      }
+      const result = await syncWaTemplates(req.ctx, numberId);
       res.json(result);
     } catch (err) {
       next(err);

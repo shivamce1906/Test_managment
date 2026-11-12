@@ -4,6 +4,7 @@ import { useTestDb } from '../helpers/db';
 import { as, seedWorld, createPlatformAdmin, PASSWORD, tokenFor, World } from '../helpers/factory';
 import { User, Business, Branch } from '../../src/models';
 import { AuthService } from '../../src/services';
+import { getRedisClient } from '../../src/integrations/redis/redis.client';
 
 const login = (email: string, password = PASSWORD) => as().post('/auth/login', { email, password });
 
@@ -44,6 +45,8 @@ describe('Auth — login (Backend SRS §2, BR-09)', () => {
 
   it('5 consecutive failures lock the account for 15 minutes, even for the right password', async () => {
     for (let i = 0; i < 5; i++) await login(w.manager.email, 'Wrong1234');
+    // Reset the per-minute IP rate-limit window so the 6th attempt exercises DB account lockout (BR-09).
+    await getRedisClient().flushall();
     const res = await login(w.manager.email);
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('ACCOUNT_LOCKED');
@@ -66,6 +69,7 @@ describe('Auth — login (Backend SRS §2, BR-09)', () => {
   it('a successful login resets the failure counter (4 fails + success + 4 fails = not locked)', async () => {
     for (let i = 0; i < 4; i++) await login(w.manager.email, 'Wrong1234');
     expect((await login(w.manager.email)).status).toBe(200);
+    await getRedisClient().flushall();
     for (let i = 0; i < 4; i++) await login(w.manager.email, 'Wrong1234');
     expect((await login(w.manager.email)).status).toBe(200);
   });

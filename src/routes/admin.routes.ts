@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { authenticate } from '../middlewares/auth.middleware';
 import { requireRole } from '../middlewares/role.middleware';
 import { validate } from '../middlewares/validate.middleware';
@@ -12,8 +13,14 @@ import {
   idParamSchema,
   passwordChangeSchema,
   decideBranchRequestSchema,
+  configureWaNumberSchema,
 } from '../validations';
 import { AdminController } from '../controllers/admin.controller';
+
+const createImportJobSchema = z.object({
+  type: z.enum(['customers', 'services', 'products', 'staff', 'plans', 'wallet']),
+  fileKey: z.string().min(1),
+});
 
 export const adminRouter = Router();
 
@@ -49,12 +56,12 @@ adminRouter.post(
 );
 
 // 3. WhatsApp Configuration for Tenant
-adminRouter.post('/businesses/:id/wa-config', AdminController.configureWaConfig);
+adminRouter.post('/businesses/:id/wa-config', validate({ params: idParamSchema, body: configureWaNumberSchema }), AdminController.configureWaConfig);
 
 // 4. Data Migration Import Jobs
-adminRouter.post('/businesses/:id/import-jobs', AdminController.createImportJob);
-adminRouter.post('/import-jobs/:id/confirm', AdminController.confirmImportJob);
-adminRouter.get('/businesses/:id/import-jobs', AdminController.getImportJobs);
+adminRouter.post('/businesses/:id/import-jobs', validate({ params: idParamSchema, body: createImportJobSchema }), AdminController.createImportJob);
+adminRouter.post('/import-jobs/:id/confirm', validate({ params: idParamSchema }), AdminController.confirmImportJob);
+adminRouter.get('/businesses/:id/import-jobs', validate({ params: idParamSchema }), AdminController.getImportJobs);
 
 // 5. Audit Log Inspection
 adminRouter.get('/audit-logs', AdminController.getAuditLogs);

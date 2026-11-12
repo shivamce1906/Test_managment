@@ -626,6 +626,22 @@ export async function applyMessageStatus(businessId: Types.ObjectId | string, pr
   return true;
 }
 
+
+/** Milliseconds until quiet hours (IST, e.g. 21:00-09:00) end, or 0 when it is not quiet now. */
+function msUntilQuietEnds(quietStart: string, quietEnd: string, now: Date = new Date()): number {
+  const toMin = (hhmm: string) => {
+    const [h, m] = hhmm.split(':').map(Number);
+    return h * 60 + (m || 0);
+  };
+  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+  const cur = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  const start = toMin(quietStart);
+  const end = toMin(quietEnd);
+  const quiet = start <= end ? cur >= start && cur < end : cur >= start || cur < end;
+  if (!quiet) return 0;
+  return (((end - cur + 24 * 60) % (24 * 60)) || 24 * 60) * 60 * 1000;
+}
+
 export async function processInboundWebhook(
   numberId: string | Types.ObjectId,
   payload: {
@@ -793,7 +809,7 @@ export async function processInboundWebhook(
             staffIds,
             rating: ratingNum as any,
             comment: payload.text,
-            reviewLinkSent: isHighRating,
+            reviewLinkSent: false, // set to true below only if the review link is actually queued
           });
 
           if (ratingNum <= 3) {
@@ -809,9 +825,18 @@ export async function processInboundWebhook(
             }
           } else if (isHighRating && branchId) {
             const branch = await Branch.findOne({ _id: branchId, businessId: waNum.businessId });
-            const reviewAuto = await Automation.findOne({ businessId: waNum.businessId, key: 'review_push' });
-            const canSendReview = !reviewAuto || reviewAuto.enabled;
-            if (branch?.googleReviewUrl && canSendReview) {
+            // Sent only when the owner switched "review_push" on (off by default). It is a marketing
+            // message: it counts towards the daily marketing limit and waits for quiet hours to end.
+            const reviewAuto = await Automation.findOne({ businessId: waNum.businessId, key: 'review_push', enabled: true });
+            const business = await Business.findById(waNum.businessId).select('automationGuards').lean();
+            const guards: any = business?.automationGuards || {};
+            const todayStr = getBusinessDate();
+            const maxPerDay = Number.isInteger(guards.maxMarketingPerDay) ? guards.maxMarketingPerDay : 1;
+            const marketingToday = conv.customerId
+              ? await AutomationSend.countDocuments({ businessId: waNum.businessId, _id: { $regex: `^mktcap:${conv.customerId}:${todayStr}:` } })
+              : 0;
+            const underCap = maxPerDay > 0 && marketingToday < maxPerDay;
+            if (branch?.googleReviewUrl && reviewAuto && underCap) {
               const dedupeKey = `review_push:${feedback._id}`;
               const already = await AutomationSend.findById(dedupeKey);
               if (!already) {
@@ -838,12 +863,26 @@ export async function processInboundWebhook(
                   messageId: reviewMsg._id,
                   at: new Date(),
                 });
+                if (conv.customerId) {
+                  await AutomationSend.create({
+                    _id: `mktcap:${conv.customerId}:${todayStr}:${reviewMsg._id}`,
+                    businessId: waNum.businessId,
+                    messageId: reviewMsg._id,
+                    at: new Date(),
+                  });
+                }
 
-                await whatsappSendQueue().add(
-                  'send',
-                  { messageId: reviewMsg._id.toString() },
-                  { jobId: reviewMsg._id.toString() }
-                );
+                // In quiet hours (IST) the message waits until they end
+                const delay = msUntilQuietEnds(guards.quietStart || '21:00', guards.quietEnd || '09:00');
+                // A queue problem must not fail the customer's incoming message (the webhook would be retried)
+                await whatsappSendQueue()
+                  .add(
+                    'send',
+                    { messageId: reviewMsg._id.toString(), businessId: String(waNum.businessId) },
+                    { jobId: reviewMsg._id.toString(), ...(delay > 0 ? { delay } : {}) }
+                  )
+                  .catch((err: any) => logger.warn({ err, messageId: reviewMsg._id }, 'Review message could not be queued'));
+                await Feedback.updateOne({ _id: feedback._id, businessId: waNum.businessId }, { $set: { reviewLinkSent: true } });
               }
             }
           }
@@ -1053,7 +1092,8 @@ export async function submitFeedback(
       staffIds: input.staffIds.map((id) => new Types.ObjectId(id)),
       rating: input.rating,
       comment: input.comment,
-      reviewLinkSent: isHighRating,
+      // Feedback entered by staff does not send a review link (only a customer's WhatsApp reply does)
+      reviewLinkSent: false,
       createdBy: ctx.userId,
       updatedBy: ctx.userId,
     },

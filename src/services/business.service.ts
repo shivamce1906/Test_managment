@@ -1,3 +1,4 @@
+import { clearStatusCache } from './auth.service';
 import { Types } from 'mongoose';
 import {
   Business,
@@ -209,6 +210,7 @@ export class BusinessService {
     const previousStatus = business.status;
     applyBusinessUpdates(business, updates);
     await business.save();
+    if (business.status !== previousStatus) await clearStatusCache({ businessId: business._id });
 
     if (updates.status === 'suspended' && previousStatus !== 'suspended') {
       // Revoke sessions of all users in the business
@@ -344,6 +346,7 @@ export class BusinessService {
 
     branch.status = 'deactivated';
     await branch.save();
+    await clearStatusCache({ branchId: branch._id });
 
     // Deactivate branch login user and revoke session
     const branchUser = await User.findOne({ branchLoginFor: branchId }, null, { skipTenantScope: true });

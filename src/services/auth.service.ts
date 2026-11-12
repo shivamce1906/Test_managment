@@ -25,6 +25,41 @@ export interface TokenPayload {
   sv: number;
 }
 
+
+/** How long business / branch statuses are cached for the per-request active check. */
+const STATUS_CACHE_SECONDS = 15;
+
+async function cachedStatus(key: string, load: () => Promise<string>): Promise<string> {
+  const redis = getRedisClient();
+  const cached = await redis.get(key).catch(() => null);
+  if (cached) return cached;
+  const status = await load();
+  await redis.set(key, status, 'EX', STATUS_CACHE_SECONDS).catch(() => undefined);
+  return status;
+}
+
+/** A business's status ('missing' when it does not exist), cached briefly in Redis. */
+export function getBusinessStatus(businessId: Types.ObjectId | string): Promise<string> {
+  return cachedStatus(`bstat:${businessId}`, async () => {
+    const b = await Business.findById(businessId).select('status').lean();
+    return b?.status || 'missing';
+  });
+}
+
+/** A branch's status ('missing' when it does not exist), cached briefly in Redis. */
+export function getBranchStatus(branchId: Types.ObjectId | string): Promise<string> {
+  return cachedStatus(`brstat:${branchId}`, async () => {
+    const br = await Branch.findById(branchId, null, { skipTenantScope: true }).select('status').lean();
+    return br?.status || 'missing';
+  });
+}
+
+/** Forget cached statuses right after a business or branch status changes. */
+export async function clearStatusCache(ids: { businessId?: Types.ObjectId | string; branchId?: Types.ObjectId | string }) {
+  const keys = [ids.businessId && `bstat:${ids.businessId}`, ids.branchId && `brstat:${ids.branchId}`].filter(Boolean) as string[];
+  if (keys.length) await getRedisClient().del(...keys).catch(() => undefined);
+}
+
 export class AuthService {
   // Resolved per call: server.ts may swap in the mock client after this service is constructed.
   private get redis() {
@@ -112,13 +147,13 @@ export class AuthService {
       if (user.status !== 'active') {
         throw new AppError(403, 'ACCOUNT_INACTIVE', 'Account is inactive');
       }
-      const business = await Business.findById(user.businessId);
-      if (!business || business.status === 'suspended') {
+      const businessStatus = await getBusinessStatus(user.businessId);
+      if (businessStatus === 'missing' || businessStatus === 'suspended') {
         throw new AppError(403, 'ACCOUNT_INACTIVE', 'Business account is suspended or inactive');
       }
       if (user.role === 'branch' && user.branchLoginFor) {
-        const branch = await Branch.findById(user.branchLoginFor, null, { skipTenantScope: true });
-        if (!branch || branch.status === 'deactivated') {
+        const branchStatus = await getBranchStatus(user.branchLoginFor);
+        if (branchStatus === 'missing' || branchStatus === 'deactivated') {
           throw new AppError(403, 'ACCOUNT_INACTIVE', 'Branch is deactivated');
         }
       }

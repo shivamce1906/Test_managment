@@ -37,7 +37,16 @@ feedbackSchema.plugin(baseFieldsPlugin);
 feedbackSchema.plugin(tenantScopePlugin);
 
 feedbackSchema.index({ businessId: 1, branchId: 1, createdAt: -1 });
-feedbackSchema.index({ businessId: 1, billId: 1 }, { unique: true, sparse: true });
-feedbackSchema.index({ businessId: 1, appointmentId: 1 }, { unique: true, sparse: true });
+// One feedback per bill and per appointment. "sparse" does not work on a compound index whose first
+// field (businessId) is always present: every feedback without a bill (or without an appointment)
+// collided with the first one. Partial indexes only cover feedback that has the field.
+feedbackSchema.index(
+  { businessId: 1, billId: 1 },
+  { unique: true, partialFilterExpression: { billId: { $exists: true } }, name: 'businessId_1_billId_1_partial' }
+);
+feedbackSchema.index(
+  { businessId: 1, appointmentId: 1 },
+  { unique: true, partialFilterExpression: { appointmentId: { $exists: true } }, name: 'businessId_1_appointmentId_1_partial' }
+);
 
 export const Feedback = model<IFeedback>('feedback', feedbackSchema);

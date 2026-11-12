@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { getDashboardKPIs, generateStandardReport, exportReportToExcel } from '../services';
+import { getDashboardKPIs, generateStandardReport, exportReportToExcel, exportReportToPdf } from '../services';
 
 export class ReportController {
   public static async getDashboard(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -22,9 +22,16 @@ export class ReportController {
 
   public static async exportReport(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { from, to } = req.query as any;
-      const buffer = await exportReportToExcel(req.ctx, req.params.name, req.query as any);
+      const { from, to, format } = req.query as any;
       const span = from ? `_${from}${to && to !== from ? `_to_${to}` : ''}` : '';
+      if (format === 'pdf') {
+        const pdf = await exportReportToPdf(req.ctx, req.params.name, req.query as any);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${req.params.name}${span}.pdf"`);
+        res.send(pdf);
+        return;
+      }
+      const buffer = await exportReportToExcel(req.ctx, req.params.name, req.query as any);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="${req.params.name}${span}.xlsx"`);
       res.send(buffer);

@@ -36,4 +36,8 @@ export const reportQuerySchema = z.object({
   branchId: objectIdSchema.optional(),
   from: isoDateSchema.optional(),
   to: isoDateSchema.optional(),
+  // sales-summary: rows per day (default) or per person who raised the bill
+  groupBy: z.enum(['day', 'billedBy']).optional(),
+  // export: Excel (default) or PDF
+  format: z.enum(['xlsx', 'pdf']).optional(),
 });

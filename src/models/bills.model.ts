@@ -279,6 +279,8 @@ billSchema.plugin(tenantScopePlugin);
 billSchema.index({ businessId: 1, invoiceNo: 1 }, { unique: true });
 billSchema.index({ businessId: 1, idempotencyKey: 1 }, { unique: true });
 billSchema.index({ businessId: 1, branchId: 1, businessDate: -1 });
+// Refunds are reported on the day they were paid out (sales-summary)
+billSchema.index({ businessId: 1, 'refunds.businessDate': 1 });
 billSchema.index({ businessId: 1, customerId: 1, businessDate: -1 });
 billSchema.index({ businessId: 1, status: 1, branchId: 1 });
 billSchema.index({ businessId: 1, branchId: 1, 'payments.businessDate': 1 });

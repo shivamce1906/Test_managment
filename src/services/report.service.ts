@@ -23,6 +23,7 @@ import {
 import { AppError, ErrorCode, getBusinessDate, addDays } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import ExcelJS from 'exceljs';
+import { renderReportPdf } from '../integrations/pdf/report.pdf';
 
 /*
  * Reports are computed from the source records (bills, receipts, ledgers, stock, attendance), so
@@ -56,6 +57,8 @@ export interface ReportParams {
   branchId?: string;
   from?: string;
   to?: string;
+  /** sales-summary only: 'day' (default) or 'billedBy' */
+  groupBy?: 'day' | 'billedBy';
 }
 
 interface Scope {
@@ -120,6 +123,47 @@ async function billsInRange(s: Scope, opts: { withRefundsInRange?: boolean } = {
 
 const lineKindNet = (bill: any, kinds: string[]) => sum(bill.lines.filter((l: any) => kinds.includes(l.kind)).map((l: any) => l.taxablePaise));
 const PLAN_KINDS = ['membership', 'package', 'wallet_topup', 'voucher'];
+
+
+// ---- Database-side bill totals (used by sales-summary and branch-comparison) ----
+const linesNet = (kinds: string[]) => ({
+  $sum: { $map: { input: { $filter: { input: '$lines', as: 'l', cond: { $in: ['$$l.kind', kinds] } } }, as: 'l', in: '$$l.taxablePaise' } },
+});
+const paidBy = (mode: string) => ({
+  $sum: { $map: { input: { $filter: { input: '$payments', as: 'p', cond: { $eq: ['$$p.mode', mode] } } }, as: 'p', in: '$$p.amountPaise' } },
+});
+/** Per-bill figures, computed in the database. */
+const BILL_FIGURES = {
+  customerId: 1,
+  grossPaise: '$totals.grossPaise',
+  discountPaise: '$totals.discountPaise',
+  netPaise: '$totals.taxablePaise',
+  taxPaise: { $add: ['$totals.cgstPaise', '$totals.sgstPaise'] },
+  totalPaise: '$totals.totalPaise',
+  servicesPaise: linesNet(['service']),
+  productsPaise: linesNet(['product']),
+  plansPaise: linesNet(['membership', 'package', 'wallet_topup', 'voucher']),
+  tipsPaise: { $sum: { $map: { input: { $ifNull: ['$tips', []] }, as: 't', in: '$$t.amountPaise' } } },
+  cashPaise: paidBy('cash'),
+  upiPaise: paidBy('upi'),
+  cardPaise: paidBy('card'),
+  walletPaise: paidBy('wallet'),
+};
+const FIGURE_KEYS = ['grossPaise', 'discountPaise', 'netPaise', 'taxPaise', 'totalPaise', 'servicesPaise', 'productsPaise', 'plansPaise', 'tipsPaise', 'cashPaise', 'upiPaise', 'cardPaise', 'walletPaise'];
+/** Group stage: bill count, distinct customers and the sum of every figure. */
+const GROUP_FIGURES: Record<string, any> = {
+  bills: { $sum: 1 },
+  customerSet: { $addToSet: '$customerId' },
+  ...Object.fromEntries(FIGURE_KEYS.map((k) => [k, { $sum: `$${k}` }])),
+};
+/** One output row in the original field order (missing group means zeros). */
+function figureRow(g: any): Record<string, number> {
+  return {
+    bills: g.bills || 0,
+    customers: g.customerSet ? g.customerSet.length : 0,
+    ...Object.fromEntries(FIGURE_KEYS.map((k) => [k, g[k] || 0])),
+  };
+}
 
 // ----------------------------------------------------
 // Dashboard
@@ -208,6 +252,22 @@ export async function getDashboardKPIs(ctx: RequestContext, branchId?: string) {
   return kpis;
 }
 
+
+/** GST state codes for "Place Of Supply" (e.g. "24-Gujarat"). */
+const GST_STATE_CODES: Record<string, string> = {
+  'jammu and kashmir': '01', 'himachal pradesh': '02', punjab: '03', chandigarh: '04', uttarakhand: '05', haryana: '06',
+  delhi: '07', rajasthan: '08', 'uttar pradesh': '09', bihar: '10', sikkim: '11', 'arunachal pradesh': '12', nagaland: '13',
+  manipur: '14', mizoram: '15', tripura: '16', meghalaya: '17', assam: '18', 'west bengal': '19', jharkhand: '20',
+  odisha: '21', chhattisgarh: '22', 'madhya pradesh': '23', gujarat: '24', 'dadra and nagar haveli and daman and diu': '26',
+  maharashtra: '27', karnataka: '29', goa: '30', lakshadweep: '31', kerala: '32', 'tamil nadu': '33', puducherry: '34',
+  'andaman and nicobar islands': '35', telangana: '36', 'andhra pradesh': '37', ladakh: '38',
+};
+function placeOfSupply(state?: string): string {
+  if (!state) return '';
+  const code = GST_STATE_CODES[state.trim().toLowerCase()];
+  return code ? `${code}-${state.trim()}` : state.trim();
+}
+
 // ----------------------------------------------------
 // Reports
 // ----------------------------------------------------
@@ -223,43 +283,55 @@ export async function generateStandardReport(ctx: RequestContext, reportName: st
 
   switch (reportName as ReportName) {
     case 'sales-summary': {
-      const [bills, receipts] = await Promise.all([
-        billsInRange(s, { withRefundsInRange: true }),
-        DueReceipt.find({ businessId: s.businessId, ...branchMatch(s), businessDate: { $gte: s.from, $lte: s.to } }).lean(),
+      // Totals are added up by the database (one group per day, or per "billed by"), so a
+      // 12-month report does not load every bill into memory. Same figures as before.
+      const effective = { businessId: s.businessId, ...branchMatch(s), businessDate: { $gte: s.from, $lte: s.to }, status: { $in: EFFECTIVE } };
+      const byBilledBy = params.groupBy === 'billedBy';
+      const [grouped, refunds, receipts] = await Promise.all([
+        Bill.aggregate([
+          { $match: effective },
+          { $project: { ...BILL_FIGURES, key: byBilledBy ? { $ifNull: ['$billedByName', '—'] } : '$businessDate' } },
+          { $group: { _id: '$key', ...GROUP_FIGURES } },
+        ]),
+        byBilledBy
+          ? Promise.resolve([] as any[])
+          : Bill.aggregate([
+              { $match: { businessId: s.businessId, ...branchMatch(s), 'refunds.businessDate': { $gte: s.from, $lte: s.to } } },
+              { $unwind: '$refunds' },
+              { $match: { 'refunds.businessDate': { $gte: s.from, $lte: s.to } } },
+              { $group: { _id: '$refunds.businessDate', refundsPaise: { $sum: '$refunds.amountPaise' } } },
+            ]),
+        byBilledBy
+          ? Promise.resolve([] as any[])
+          : DueReceipt.find({ businessId: s.businessId, ...branchMatch(s), businessDate: { $gte: s.from, $lte: s.to } }).lean(),
       ]);
+
+      if (byBilledBy) {
+        // Sales per receptionist / person who raised the bill (FR-RPT-03)
+        const rows = grouped
+          .map((g: any) => ({ billedBy: g._id, ...figureRow(g) }))
+          .sort((a: any, b: any) => b.netPaise - a.netPaise);
+        const totals: any = {};
+        for (const k of Object.keys(rows[0] || {}).filter((k) => k !== 'billedBy')) totals[k] = sum(rows.map((r: any) => r[k]));
+        totals.avgTicketPaise = totals.bills ? Math.round(totals.netPaise / totals.bills) : 0;
+        return { ...head, groupBy: 'billedBy', summary: rows.length ? totals : null, rows };
+      }
+
       const days = new Map<string, any>();
       const day = (d: string) => {
-        if (!days.has(d)) {
-          days.set(d, { date: d, bills: 0, customers: new Set<string>(), grossPaise: 0, discountPaise: 0, netPaise: 0, taxPaise: 0, totalPaise: 0, servicesPaise: 0, productsPaise: 0, plansPaise: 0, tipsPaise: 0, cashPaise: 0, upiPaise: 0, cardPaise: 0, walletPaise: 0, duesCollectedPaise: 0, refundsPaise: 0 });
-        }
+        if (!days.has(d)) days.set(d, { date: d, ...figureRow({}), duesCollectedPaise: 0, refundsPaise: 0 });
         return days.get(d);
       };
-      for (const b of bills) {
-        if (EFFECTIVE.includes(b.status) && inRange(b.businessDate, s)) {
-          const r = day(b.businessDate);
-          r.bills += 1;
-          r.customers.add(String(b.customerId));
-          r.grossPaise += b.totals.grossPaise;
-          r.discountPaise += b.totals.discountPaise;
-          r.netPaise += b.totals.taxablePaise;
-          r.taxPaise += b.totals.cgstPaise + b.totals.sgstPaise;
-          r.totalPaise += b.totals.totalPaise;
-          r.servicesPaise += lineKindNet(b, ['service']);
-          r.productsPaise += lineKindNet(b, ['product']);
-          r.plansPaise += lineKindNet(b, PLAN_KINDS);
-          r.tipsPaise += sum((b.tips || []).map((t: any) => t.amountPaise));
-          for (const p of b.payments) r[`${p.mode}Paise`] += p.amountPaise;
-        }
-        for (const rf of b.refunds || []) if (inRange(rf.businessDate, s)) day(rf.businessDate).refundsPaise += rf.amountPaise;
-      }
-      for (const rc of receipts) {
+      for (const g of grouped) Object.assign(day(g._id), figureRow(g));
+      for (const rf of refunds as any[]) day(rf._id).refundsPaise += rf.refundsPaise;
+      for (const rc of receipts as any[]) {
         const r = day(rc.businessDate);
         for (const p of rc.payments) {
           r[`${p.mode}Paise`] += p.amountPaise;
           r.duesCollectedPaise += p.amountPaise;
         }
       }
-      const rows = [...days.values()].sort((a, b) => a.date.localeCompare(b.date)).map((r) => ({ ...r, customers: r.customers.size }));
+      const rows = [...days.values()].sort((a, b) => a.date.localeCompare(b.date));
       const totals: any = {};
       for (const k of Object.keys(rows[0] || {}).filter((k) => k !== 'date')) totals[k] = sum(rows.map((r: any) => r[k]));
       totals.avgTicketPaise = totals.bills ? Math.round(totals.netPaise / totals.bills) : 0;
@@ -267,24 +339,28 @@ export async function generateStandardReport(ctx: RequestContext, reportName: st
     }
 
     case 'branch-comparison': {
-      const bills = await billsInRange(s);
+      const grouped = await Bill.aggregate([
+        { $match: { businessId: s.businessId, ...branchMatch(s), businessDate: { $gte: s.from, $lte: s.to }, status: { $in: EFFECTIVE } } },
+        { $project: { ...BILL_FIGURES, key: '$branchId' } },
+        { $group: { _id: '$key', ...GROUP_FIGURES } },
+      ]);
+      const byBranch = new Map(grouped.map((g: any) => [String(g._id), g]));
       const rows = [...names.entries()].map(([id, b]) => {
-        const mine = bills.filter((x) => String(x.branchId) === id);
-        const net = sum(mine.map((x) => x.totals.taxablePaise));
+        const f = figureRow(byBranch.get(id) || {});
         return {
           branchId: id,
           branchName: b.name,
           branchCode: b.code,
-          bills: mine.length,
-          customers: new Set(mine.map((x) => String(x.customerId))).size,
-          grossPaise: sum(mine.map((x) => x.totals.grossPaise)),
-          discountPaise: sum(mine.map((x) => x.totals.discountPaise)),
-          netPaise: net,
-          totalPaise: sum(mine.map((x) => x.totals.totalPaise)),
-          servicesPaise: sum(mine.map((x) => lineKindNet(x, ['service']))),
-          productsPaise: sum(mine.map((x) => lineKindNet(x, ['product']))),
-          plansPaise: sum(mine.map((x) => lineKindNet(x, PLAN_KINDS))),
-          avgTicketPaise: mine.length ? Math.round(net / mine.length) : 0,
+          bills: f.bills,
+          customers: f.customers,
+          grossPaise: f.grossPaise,
+          discountPaise: f.discountPaise,
+          netPaise: f.netPaise,
+          totalPaise: f.totalPaise,
+          servicesPaise: f.servicesPaise,
+          productsPaise: f.productsPaise,
+          plansPaise: f.plansPaise,
+          avgTicketPaise: f.bills ? Math.round(f.netPaise / f.bills) : 0,
         };
       });
       rows.sort((a, b) => b.netPaise - a.netPaise);
@@ -633,6 +709,65 @@ export async function generateStandardReport(ctx: RequestContext, reportName: st
       }
       const b2cs = [...byRate.values()];
       const hsn = [...byHsn.values()];
+
+      // GST portal offline-tool layout for the Excel export (b2b, b2cs, hsn, docs sheets)
+      const pos = placeOfSupply(business.address?.state);
+      const rs = (paise: number) => Math.round(paise) / 100;
+      const hsnDetail = new Map<string, { description: string; uqc: string }>();
+      for (const b of bills) {
+        for (const l of b.lines.filter((x: any) => x.gstBps > 0)) {
+          const key = `${l.hsnSac || ''}:${l.gstBps}`;
+          if (!hsnDetail.has(key)) hsnDetail.set(key, { description: l.name || '', uqc: l.kind === 'product' ? 'NOS-NUMBERS' : 'NA' });
+        }
+      }
+      // Document series: every invoice number issued in the period, including cancelled ones
+      const issued = await Bill.find({ businessId: s.businessId, ...branchMatch(s), businessDate: { $gte: s.from, $lte: s.to }, invoiceNo: { $exists: true, $ne: null } })
+        .select('invoiceNo status')
+        .lean();
+      const series = new Map<string, { numbers: string[]; cancelled: number }>();
+      for (const b of issued as any[]) {
+        const prefix = String(b.invoiceNo).replace(/\d+$/, '');
+        const cur = series.get(prefix) || { numbers: [], cancelled: 0 };
+        cur.numbers.push(String(b.invoiceNo));
+        if (b.status === 'cancelled') cur.cancelled += 1;
+        series.set(prefix, cur);
+      }
+      const offlineTool = {
+        b2b: [] as Record<string, unknown>[], // customer GSTINs are not captured on bills yet
+        b2cs: b2cs.map((r: any) => ({
+          Type: 'OE',
+          'Place Of Supply': pos,
+          'Applicable % of Tax Rate': '',
+          Rate: r.ratePct,
+          'Taxable Value': rs(r.taxablePaise),
+          'Cess Amount': 0,
+          'E-Commerce GSTIN': '',
+        })),
+        hsn: [...byHsn.entries()].map(([key, h]: [string, any]) => ({
+          HSN: h.hsnSac,
+          Description: hsnDetail.get(key)?.description || '',
+          UQC: hsnDetail.get(key)?.uqc || 'NA',
+          'Total Quantity': h.qty,
+          'Total Value': rs(h.taxablePaise + h.cgstPaise + h.sgstPaise),
+          Rate: h.ratePct,
+          'Taxable Value': rs(h.taxablePaise),
+          'Integrated Tax Amount': 0,
+          'Central Tax Amount': rs(h.cgstPaise),
+          'State/UT Tax Amount': rs(h.sgstPaise),
+          'Cess Amount': 0,
+        })),
+        docs: [...series.values()].map((sr) => {
+          const sorted = sr.numbers.sort();
+          return {
+            'Nature of Document': 'Invoices for outward supply',
+            'Sr. No. From': sorted[0],
+            'Sr. No. To': sorted[sorted.length - 1],
+            'Total Number': sorted.length,
+            Cancelled: sr.cancelled,
+          };
+        }),
+      };
+
       return {
         ...head,
         gstin: business.gst.gstin,
@@ -647,6 +782,7 @@ export async function generateStandardReport(ctx: RequestContext, reportName: st
         hsn,
         rows: invoices,
         sheets: { Invoices: invoices, 'B2C by rate': b2cs, 'HSN summary': hsn },
+        offlineTool,
       };
     }
 
@@ -698,9 +834,32 @@ function addSheet(workbook: ExcelJS.Workbook, name: string, rows: any[]) {
   sheet.getRow(1).font = { bold: true };
 }
 
+/** Official GSTR-1 offline-tool headers, in order, for sheets that may have no rows. */
+const GSTR1_HEADERS: Record<string, string[]> = {
+  b2b: ['GSTIN/UIN of Recipient', 'Receiver Name', 'Invoice Number', 'Invoice date', 'Invoice Value', 'Place Of Supply', 'Reverse Charge', 'Applicable % of Tax Rate', 'Invoice Type', 'E-Commerce GSTIN', 'Rate', 'Taxable Value', 'Cess Amount'],
+  b2cs: ['Type', 'Place Of Supply', 'Applicable % of Tax Rate', 'Rate', 'Taxable Value', 'Cess Amount', 'E-Commerce GSTIN'],
+  hsn: ['HSN', 'Description', 'UQC', 'Total Quantity', 'Total Value', 'Rate', 'Taxable Value', 'Integrated Tax Amount', 'Central Tax Amount', 'State/UT Tax Amount', 'Cess Amount'],
+  docs: ['Nature of Document', 'Sr. No. From', 'Sr. No. To', 'Total Number', 'Cancelled'],
+};
+
+function addOfficialSheet(workbook: ExcelJS.Workbook, name: string, headers: string[], rows: Record<string, unknown>[]) {
+  const sheet = workbook.addWorksheet(name);
+  sheet.columns = headers.map((h) => ({ header: h, key: h, width: Math.max(14, h.length + 2) }));
+  for (const row of rows) sheet.addRow(row);
+  sheet.getRow(1).font = { bold: true };
+}
+
 export async function exportReportToExcel(ctx: RequestContext, reportName: string, params: ReportParams): Promise<Buffer> {
   const data = await generateStandardReport(ctx, reportName, params);
   const workbook = new ExcelJS.Workbook();
+
+  if (reportName === 'gstr-1' && data.offlineTool) {
+    // The GST portal's offline-tool layout: one sheet per table, official column names, rupees
+    for (const [name, headers] of Object.entries(GSTR1_HEADERS)) {
+      addOfficialSheet(workbook, name, headers, data.offlineTool[name] || []);
+    }
+    return Buffer.from(await workbook.xlsx.writeBuffer());
+  }
 
   const summary = [
     { metric: 'Report', value: reportName },
@@ -717,4 +876,18 @@ export async function exportReportToExcel(ctx: RequestContext, reportName: strin
 
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer);
+}
+
+// ----------------------------------------------------
+// PDF Export
+// ----------------------------------------------------
+
+export async function exportReportToPdf(ctx: RequestContext, reportName: string, params: ReportParams): Promise<Buffer> {
+  const data = await generateStandardReport(ctx, reportName, params);
+  const business = await Business.findById(toObjectId(ctx.businessId!)).select('name').lean();
+  const title = reportName.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).replace('Gstr 1', 'GSTR-1');
+  const tables = data.sheets
+    ? Object.entries<any[]>(data.sheets).map(([name, rows]) => ({ name, rows }))
+    : [{ name: data.groupBy === 'billedBy' ? 'By billed by' : 'Details', rows: data.rows || [] }];
+  return renderReportPdf({ title, businessName: business?.name, from: data.from, to: data.to, summary: data.summary, tables });
 }

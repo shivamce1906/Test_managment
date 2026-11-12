@@ -14,9 +14,10 @@ import '../src/models';
 
 /** Indexes whose definition was wrong and has been replaced in the schema. */
 const OBSOLETE = [
-  // Compound + sparse still indexed every plan with voucherCode null: one non-voucher plan per business.
-  // Replaced by businessId_1_voucherCode_1_partial (unique where voucherCode is a string).
-  { collection: 'customerPlans', name: 'businessId_1_voucherCode_1' },
+  // Compound + sparse still indexed every feedback without a bill / appointment: a business could
+  // record only one such feedback. Replaced by the *_partial indexes (unique where the field exists).
+  { collection: 'feedback', name: 'businessId_1_billId_1' },
+  { collection: 'feedback', name: 'businessId_1_appointmentId_1' },
 ];
 
 async function main() {

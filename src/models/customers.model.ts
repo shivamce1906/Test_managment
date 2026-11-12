@@ -102,6 +102,22 @@ const customerSchema = new Schema<ICustomer>(
 customerSchema.plugin(baseFieldsPlugin);
 customerSchema.plugin(tenantScopePlugin);
 
+/**
+ * Remember the counters as they were read, so billing can write only its changes atomically
+ * ($inc) instead of overwriting the whole document (see persistCustomerChanges in billing).
+ */
+customerSchema.post('init', function (this: any) {
+  this.$locals.loadedCounters = {
+    walletBalancePaise: this.walletBalancePaise || 0,
+    loyaltyPoints: this.loyaltyPoints || 0,
+    duePaise: this.duePaise || 0,
+    visits: this.stats?.visits || 0,
+    spendPaise: this.stats?.spendPaise || 0,
+    firstVisit: this.stats?.firstVisit,
+    lastVisit: this.stats?.lastVisit,
+  };
+});
+
 customerSchema.index({ businessId: 1, phone: 1 }, { unique: true });
 customerSchema.index({ businessId: 1, altPhones: 1 });
 customerSchema.index({ businessId: 1, 'stats.lastVisit': 1 });

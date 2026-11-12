@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { AuthService } from '../services';
-import { PlatformAdmin, User, Business, Branch } from '../models';
+import { PlatformAdmin, User } from '../models';
+import { getBusinessStatus, getBranchStatus } from '../services/auth.service';
 import { AppError, ErrorCode } from '../utils';
 import { RequestContext } from '../services';
 
@@ -52,14 +53,16 @@ export function authenticate(options: { required?: boolean } = { required: true 
           throw new AppError(401, ErrorCode.SESSION_REVOKED, 'Session has been revoked');
         }
 
-        const business = await Business.findById(user.businessId).lean();
-        if (!business || business.status === 'suspended') {
+        // Statuses come from a 15-second Redis cache (cleared when the Super Admin changes them),
+        // so this check costs no database read on most requests
+        const businessStatus = await getBusinessStatus(user.businessId);
+        if (businessStatus === 'missing' || businessStatus === 'suspended') {
           throw new AppError(403, ErrorCode.ACCOUNT_INACTIVE, 'Business account is suspended or inactive');
         }
 
         if (user.role === 'branch' && user.branchLoginFor) {
-          const branch = await Branch.findById(user.branchLoginFor, null, { skipTenantScope: true }).lean();
-          if (!branch || branch.status === 'deactivated') {
+          const branchStatus = await getBranchStatus(user.branchLoginFor);
+          if (branchStatus === 'missing' || branchStatus === 'deactivated') {
             throw new AppError(403, ErrorCode.BRANCH_INACTIVE, 'Branch is deactivated');
           }
         }

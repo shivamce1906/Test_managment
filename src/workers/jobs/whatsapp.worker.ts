@@ -50,6 +50,48 @@ function msUntilQuietEndIst(guards?: { quietStart?: string; quietEnd?: string },
   return Math.max(60 * 1000, diffMin * 60 * 1000);
 }
 
+/**
+ * Counts one finished campaign message (sent, or failed with no retry left) and closes the campaign
+ * once every queued message is accounted for: completed if any were sent, failed if none were.
+ */
+export async function recordCampaignResult(
+  businessId: Types.ObjectId,
+  campaignId: Types.ObjectId,
+  result: 'sent' | 'failed',
+  costPaise = 0
+): Promise<void> {
+  const inc: Record<string, number> = { [`stats.${result}`]: 1 };
+  if (costPaise) inc['stats.costPaise'] = costPaise;
+  const campaign = await Campaign.findOneAndUpdate({ _id: campaignId, businessId }, { $inc: inc }, { new: true });
+  // While messages are still being queued, stats.total is not final: nothing to close yet
+  if (!campaign || campaign.status !== 'sending' || !campaign.queuedAt) return;
+  const { total = 0, sent = 0, failed = 0 } = campaign.stats || ({} as any);
+  if (total > 0 && sent + failed >= total) {
+    // The status filter makes sure only one update closes it
+    await Campaign.updateOne(
+      { _id: campaignId, businessId, status: 'sending' },
+      { $set: { status: sent === 0 ? 'failed' : 'completed' } }
+    );
+  }
+}
+
+/** A successful send proves the balance is fine again: clear the flag and tell the owner. */
+export async function clearLowBalance(numberDoc: any): Promise<void> {
+  if (!numberDoc?.lowBalance) return;
+  numberDoc.lowBalance = false;
+  await numberDoc.save();
+  const owner = await User.findOne({ businessId: numberDoc.businessId, role: 'owner', status: 'active' });
+  if (owner) {
+    await Notification.create({
+      businessId: numberDoc.businessId,
+      userId: owner._id,
+      type: 'wa_balance_restored',
+      title: 'WhatsApp balance restored',
+      body: 'Messages are going out again. Campaigns paused for low balance stay paused until you resume them.',
+    });
+  }
+}
+
 export function createWhatsAppWorker(): Worker {
   const connection = getBullConnection();
 
@@ -70,9 +112,24 @@ export function createWhatsAppWorker(): Worker {
         return;
       }
 
+      // Campaign messages update their campaign's counters when they finish. A failure counts only
+      // when no retry follows (permanent rejection, or BullMQ's last attempt).
+      const isLastAttempt = (job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1);
+      const finish = async (result: 'sent' | 'failed', costPaise = 0, final = true) => {
+        if (message.origin !== 'campaign' || !message.originId) return;
+        if (result === 'failed' && !final) return;
+        await recordCampaignResult(message.businessId, message.originId, result, costPaise).catch((err) =>
+          logger.warn({ err, messageId }, 'Could not update campaign counters')
+        );
+      };
+
       const conversation = await WaConversation.findById(message.conversationId).setOptions({ skipTenantScope: true });
       if (!conversation) {
         logger.warn({ conversationId: message.conversationId }, 'Conversation not found for message');
+        message.status = 'failed';
+        message.error = 'Conversation not found';
+        await message.save();
+        await finish('failed');
         return;
       }
 
@@ -87,6 +144,7 @@ export function createWhatsAppWorker(): Worker {
         message.status = 'failed';
         message.error = 'No active WhatsApp number configured';
         await message.save();
+        await finish('failed');
         return;
       }
 
@@ -97,11 +155,16 @@ export function createWhatsAppWorker(): Worker {
       try {
         let templateName: string | undefined;
         if (message.templateId) {
-          const tpl = await WaTemplate.findById(message.templateId).setOptions({ skipTenantScope: true });
-          if (tpl) templateName = tpl.name;
-        }
-        if (message.kind === 'template' && !templateName && message.origin === 'transactional') {
-          templateName = 'day_end_report';
+          const tpl = await WaTemplate.findOne({ _id: message.templateId, businessId: message.businessId });
+          // WhatsApp refuses templates that are not approved: fail it now with a clear reason
+          if (!tpl || tpl.status !== 'approved') {
+            message.status = 'failed';
+            message.error = tpl ? `Template "${tpl.name}" is ${tpl.status}, not approved` : 'Template not found';
+            await message.save();
+            await finish('failed');
+            return;
+          }
+          templateName = tpl.name;
         }
 
         const response = await sendInstantBroadcastMessage({
@@ -145,6 +208,7 @@ export function createWhatsAppWorker(): Worker {
           message.error = response.error || 'Rejected by Instant Broadcast';
           await message.save();
           logger.warn({ messageId, error: message.error }, 'WhatsApp message rejected by Instant Broadcast');
+          await finish('failed');
           return;
         }
 
@@ -152,6 +216,8 @@ export function createWhatsAppWorker(): Worker {
         message.providerMessageId = response.providerMessageId || `ib_${Date.now()}`;
         message.costPaise = response.costPaise || 80;
         await message.save();
+        if (!response.lowBalance) await clearLowBalance(numberDoc);
+        await finish('sent', message.costPaise);
 
         logger.info({ messageId, providerMessageId: message.providerMessageId }, 'WhatsApp message sent successfully via Instant Broadcast');
       } catch (err: any) {
@@ -159,6 +225,7 @@ export function createWhatsAppWorker(): Worker {
         message.status = 'failed';
         message.error = err.message || 'Send error';
         await message.save();
+        await finish('failed', 0, isLastAttempt);
         throw err; // retry with BullMQ
       }
     },
@@ -257,6 +324,7 @@ export function createCampaignWorker(): Worker {
       }
 
       campaign.status = 'sending';
+      campaign.queuedAt = undefined; // set again once every message of this run is queued
       await campaign.save();
 
       // Load linked offer if exists
@@ -401,18 +469,27 @@ export function createCampaignWorker(): Worker {
         count++;
       }
 
-      campaign.stats = campaign.stats || {
-        total: customers.length,
-        excluded: 0,
-        sent: 0,
-        delivered: 0,
-        read: 0,
-        failed: 0,
-        costPaise: 0,
-      };
-      campaign.stats.sent = count;
-      campaign.status = count > 0 ? 'completed' : 'failed';
-      await campaign.save();
+      // stats.total held the audience estimate from creation; it is now the real number of messages
+      // created for this campaign (all runs, so a resumed campaign counts its earlier ones too).
+      // The campaign stays "sending" until each message is sent or finally fails (see
+      // recordCampaignResult); queuedAt marks that queuing is finished. Atomic update: the send
+      // worker may already be counting results.
+      const totalMessages = await WaMessage.countDocuments({ businessId: bId, origin: 'campaign', originId: cId });
+      const updated = await Campaign.findOneAndUpdate(
+        { _id: cId, businessId: bId },
+        { $set: { 'stats.total': totalMessages, queuedAt: new Date() } },
+        { new: true }
+      );
+      if (updated && updated.status === 'sending') {
+        const { sent = 0, failed = 0 } = updated.stats || ({} as any);
+        if (totalMessages === 0 || sent + failed >= totalMessages) {
+          await Campaign.updateOne(
+            { _id: cId, businessId: bId, status: 'sending' },
+            { $set: { status: totalMessages > 0 && sent > 0 ? 'completed' : 'failed' } }
+          );
+        }
+      }
+      logger.info({ campaignId, queued: count, totalMessages }, 'Campaign messages queued');
     },
     { connection: connection as any, concurrency: 2 }
   );

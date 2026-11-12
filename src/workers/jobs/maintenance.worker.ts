@@ -163,12 +163,9 @@ export function createLedgerCheckWorker(): Worker {
         .setOptions({ skipTenantScope: true });
       for (const cust of customers) {
         const txs = await WalletLedger.find({ businessId: cust.businessId, customerId: cust._id });
-        const computed = txs.reduce((acc: number, tx: any) => {
-          if (['topup', 'bonus', 'refund', 'imported'].includes(tx.type)) return acc + tx.amountPaise;
-          if (['redeem', 'reverse', 'expiry'].includes(tx.type)) return acc - tx.amountPaise;
-          if (tx.type === 'adjust') return acc + tx.amountPaise;
-          return acc;
-        }, 0);
+        // Ledger amounts are stored signed (credits positive, debits such as a wallet payment
+        // negative), so the balance is simply their sum
+        const computed = txs.reduce((acc: number, tx: any) => acc + (tx.amountPaise || 0), 0);
 
         if (computed !== cust.walletBalancePaise) {
           logger.error(

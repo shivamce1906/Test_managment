@@ -382,6 +382,22 @@ export async function sendMessage(
     kind: input.templateId ? 'template' : 'text',
   });
 
+  // A successful send proves the WhatsApp balance is fine again (F-23): clear the low-balance flag
+  // and tell the owner. Campaigns paused for low balance stay paused until the owner resumes them.
+  if (sendResult.success && !sendResult.lowBalance && waNum.lowBalance) {
+    await WaNumber.updateOne({ _id: waNum._id, businessId: waNum.businessId }, { $set: { lowBalance: false } });
+    const owner = await User.findOne({ businessId: waNum.businessId, role: 'owner', status: 'active' }).select('_id');
+    if (owner) {
+      await Notification.create({
+        businessId: waNum.businessId,
+        userId: owner._id,
+        type: 'wa_balance_restored',
+        title: 'WhatsApp balance restored',
+        body: 'Messages are going out again. Campaigns paused for low balance stay paused until you resume them.',
+      });
+    }
+  }
+
   const message = await WaMessage.create({
     businessId: ctx.businessId,
     conversationId: conv._id,

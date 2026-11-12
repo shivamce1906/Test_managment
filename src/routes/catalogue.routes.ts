@@ -30,8 +30,9 @@ catalogueRouter.delete('/categories/:id', requireRole('owner', 'manager'), requi
 
 // 2. Services
 catalogueRouter.post('/services', requireRole('owner', 'manager'), requirePermission('manageCatalogue'), validate({ body: createServiceSchema }), catalogueController.createService);
-catalogueRouter.post('/services/bulk-price/preview', requireRole('owner', 'manager'), requirePermission('manageCatalogue'), validate({ body: bulkPricePreviewSchema }), catalogueController.previewBulkPriceChange);
-catalogueRouter.post('/services/bulk-price/apply', requireRole('owner', 'manager'), requirePermission('manageCatalogue'), validate({ body: bulkPricePreviewSchema }), catalogueController.applyBulkPriceChange);
+// Bulk price by %: the service checks manageCatalogue (base prices) or editBranchPrices (own branch)
+catalogueRouter.post('/services/bulk-price/preview', requireRole('owner', 'manager'), validate({ body: bulkPricePreviewSchema }), catalogueController.previewBulkPriceChange);
+catalogueRouter.post('/services/bulk-price/apply', requireRole('owner', 'manager'), validate({ body: bulkPricePreviewSchema }), catalogueController.applyBulkPriceChange);
 catalogueRouter.get('/services', validate({ query: listServicesQuerySchema }), catalogueController.getServices);
 catalogueRouter.get('/services/:id', validate({ params: idParamSchema }), catalogueController.getServiceById);
 catalogueRouter.patch('/services/:id', requireRole('owner', 'manager'), requirePermission('manageCatalogue'), validate({ params: idParamSchema, body: updateServiceSchema }), catalogueController.updateService);

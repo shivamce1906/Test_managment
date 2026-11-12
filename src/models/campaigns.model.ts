@@ -18,6 +18,8 @@ export interface ICampaign extends Document {
   };
   variableMap: Record<string, string>;
   scheduledAt?: Date;
+  /** Set when the campaign worker has queued every message; only then can the campaign be closed. */
+  queuedAt?: Date;
   status: 'draft' | 'scheduled' | 'sending' | 'paused' | 'completed' | 'cancelled' | 'failed';
   stats: {
     total: number;
@@ -54,6 +56,7 @@ const campaignSchema = new Schema<ICampaign>(
     },
     variableMap: { type: Schema.Types.Mixed, default: {} },
     scheduledAt: { type: Date },
+    queuedAt: { type: Date },
     status: {
       type: String,
       enum: ['draft', 'scheduled', 'sending', 'paused', 'completed', 'cancelled', 'failed'],

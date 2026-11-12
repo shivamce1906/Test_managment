@@ -13,6 +13,7 @@ import {
   Appointment,
   Expense,
   DayClosure,
+  DueReceipt,
   AutomationSend,
 } from '../../models';
 import { logger, getBusinessDate, addDays } from '../../utils';
@@ -203,9 +204,11 @@ export function createDayEndWorker(): Worker {
             businessId: bId,
             conversationId: conversation._id,
             direction: 'out',
-            kind: 'template',
+            // With an approved 'day_end_report' template it goes as that template; without one, as
+            // plain text (as before), which WhatsApp accepts inside the owner's 24-hour window
+            kind: dayEndTpl ? 'template' : 'text',
             templateId: dayEndTpl?._id,
-            variables: [
+            variables: dayEndTpl ? [
               branch.name,
               date,
               closureStatusLabel,
@@ -213,7 +216,7 @@ export function createDayEndWorker(): Worker {
               (cashPaise / 100).toFixed(2),
               (upiPaise / 100).toFixed(2),
               String(billCount),
-            ],
+            ] : undefined,
             text: reportText,
             mediaKey: s3Key,
             origin: 'transactional',
@@ -238,82 +241,63 @@ export function createDayEndWorker(): Worker {
   );
 }
 
-async function rebuildDailySummaryForBranch(branch: any, date: string): Promise<void> {
-  const brId = branch._id;
-  const bills = await Bill.find({
-    businessId: branch.businessId,
-    branchId: brId,
-    businessDate: date,
-    status: { $in: ['paid', 'partly_paid'] },
-  });
+/** Bill statuses whose sales stay on their day (refunds are counted separately, on the refund day). */
+const SOLD_BILL_STATUSES = ['paid', 'partly_paid', 'refunded', 'partly_refunded'];
 
-  let grossPaise = 0;
-  let discountPaise = 0;
-  let netPaise = 0;
-  let taxPaise = 0;
-  let servicesPaise = 0;
-  let productsPaise = 0;
-  let plansPaise = 0;
-  let cash = 0;
-  let upi = 0;
-  let card = 0;
-  let wallet = 0;
+/**
+ * Rebuilds one branch-day summary from the source records, the same way billing keeps it up to
+ * date live: sales and tips from that day's bills (refunded bills stay in sales), collections from
+ * their payments plus due receipts, refunds by the day they were paid out, bill counts. Only these
+ * fields are replaced; anything else in the summary is left as it is.
+ */
+async function rebuildDailySummaryForBranch(branch: any, date: string): Promise<void> {
+  const businessId = branch.businessId;
+  const branchId = branch._id;
+  const bills = await Bill.find({ businessId, branchId, businessDate: date, status: { $in: SOLD_BILL_STATUSES } });
+  const cancelled = await Bill.countDocuments({ businessId, branchId, businessDate: date, status: 'cancelled' });
+  const receipts = await DueReceipt.find({ businessId, branchId, businessDate: date, status: { $ne: 'cancelled' } });
+  const refundedBills = await Bill.find({ businessId, branchId, 'refunds.businessDate': date }).select('refunds');
+
+  const sales = { grossPaise: 0, discountPaise: 0, netPaise: 0, taxPaise: 0, servicesPaise: 0, productsPaise: 0, plansPaise: 0 };
+  const collections: Record<string, number> = { cash: 0, upi: 0, card: 0, wallet: 0 };
+  let tipsPaise = 0;
 
   for (const bill of bills) {
-    grossPaise += bill.totals?.grossPaise || 0;
-    discountPaise += bill.totals?.discountPaise || 0;
-    netPaise += bill.totals?.taxablePaise || 0;
-    taxPaise += (bill.totals?.cgstPaise || 0) + (bill.totals?.sgstPaise || 0);
-
+    sales.grossPaise += bill.totals?.grossPaise || 0;
+    sales.discountPaise += bill.totals?.discountPaise || 0;
+    sales.netPaise += bill.totals?.taxablePaise || 0;
+    sales.taxPaise += (bill.totals?.cgstPaise || 0) + (bill.totals?.sgstPaise || 0);
     for (const line of bill.lines || []) {
-      if (line.kind === 'service') servicesPaise += line.totalPaise;
-      else if (line.kind === 'product') productsPaise += line.totalPaise;
-      else if (['package', 'membership', 'voucher'].includes(line.kind)) plansPaise += line.totalPaise;
+      if (line.kind === 'service') sales.servicesPaise += line.totalPaise;
+      else if (line.kind === 'product') sales.productsPaise += line.totalPaise;
+      else sales.plansPaise += line.totalPaise; // membership, package, voucher, wallet top-up (as billing does)
     }
-
-    for (const p of bill.payments || []) {
-      if (p.mode === 'cash') cash += p.amountPaise;
-      else if (p.mode === 'card') card += p.amountPaise;
-      else if (p.mode === 'upi') upi += p.amountPaise;
-      else if (p.mode === 'wallet') wallet += p.amountPaise;
-    }
+    for (const p of bill.payments || []) collections[p.mode] = (collections[p.mode] || 0) + p.amountPaise;
+    tipsPaise += (bill.tips || []).reduce((sum: number, t: any) => sum + (t.amountPaise || 0), 0);
   }
+  for (const r of receipts) {
+    for (const p of r.payments || []) collections[p.mode] = (collections[p.mode] || 0) + p.amountPaise;
+  }
+  const refundsPaise = refundedBills.reduce(
+    (sum, b: any) =>
+      sum + (b.refunds || []).filter((r: any) => r.businessDate === date).reduce((a: number, r: any) => a + r.amountPaise, 0),
+    0
+  );
 
-  const summaryId = `${brId.toString()}:${date}`;
+  const set: Record<string, unknown> = {
+    sales,
+    tipsPaise,
+    refundsPaise,
+    'counts.bills': bills.length,
+    'counts.cancelled': cancelled,
+    updatedAt: new Date(),
+  };
+  for (const [mode, amount] of Object.entries(collections)) set[`collections.${mode}`] = amount;
+
+  const summaryId = `${branchId.toString()}:${date}`;
   await DailySummary.findOneAndUpdate(
-    { _id: summaryId, businessId: branch.businessId },
-    {
-      _id: summaryId,
-      businessId: branch.businessId,
-      branchId: brId,
-      businessDate: date,
-      sales: {
-        grossPaise,
-        discountPaise,
-        netPaise,
-        taxPaise,
-        servicesPaise,
-        productsPaise,
-        plansPaise,
-      },
-      collections: {
-        cash,
-        upi,
-        card,
-        wallet,
-      },
-      refundsPaise: 0,
-      tipsPaise: 0,
-      counts: {
-        bills: bills.length,
-        cancelled: 0,
-        customers: bills.length,
-        newCustomers: 0,
-        appointments: 0,
-        noShows: 0,
-      },
-      updatedAt: new Date(),
-    },
+    { _id: summaryId, businessId },
+    { $setOnInsert: { businessId, branchId, businessDate: date }, $set: set },
     { upsert: true }
   );
 }

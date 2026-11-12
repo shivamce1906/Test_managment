@@ -232,6 +232,7 @@ export async function confirmImportJob(
 
   const rows = extractSheetRows(sheet);
   let importedCount = 0;
+  let skippedCount = 0;
   const runtimeErrors: { row: number; message: string }[] = [...((job as any).errors || [])];
 
   try {
@@ -244,30 +245,23 @@ export async function confirmImportJob(
           const phone = normalizePhone(phoneRaw);
           const email = cellStr(values[3]).toLowerCase() || undefined;
 
-          await Customer.findOneAndUpdate(
-            { businessId: job.businessId, phone },
-            {
-              $set: {
-                name,
-                ...(email ? { email } : {}),
-                updatedBy: ctx.userId,
-              },
-              $setOnInsert: {
-                businessId: job.businessId,
-                phone,
-                source: 'import',
-                tags: [],
-                waOptIn: true,
-                doNotMessage: false,
-                stats: { visits: 0, spendPaise: 0, noShows: 0 },
-                walletBalancePaise: 0,
-                loyaltyPoints: 0,
-                duePaise: 0,
-                createdBy: ctx.userId,
-              },
-            },
-            { upsert: true, new: true }
-          );
+          // Existing customers are never changed by an import (their details may be newer
+          // than the spreadsheet); they are only counted as skipped
+          const existing = await Customer.findOne({ businessId: job.businessId, phone }).select('_id');
+          if (existing) {
+            skippedCount++;
+            continue;
+          }
+          // create() runs the model validators (an upsert would silently skip them)
+          await Customer.create({
+            businessId: job.businessId,
+            name,
+            phone,
+            ...(email ? { email } : {}),
+            source: 'import',
+            createdBy: ctx.userId,
+            updatedBy: ctx.userId,
+          });
           importedCount++;
         } catch (err: any) {
           runtimeErrors.push({ row: rowNumber, message: err.message || 'Customer import failed' });
@@ -491,12 +485,13 @@ export async function confirmImportJob(
   }
 
   (job as any).errors = runtimeErrors;
-  job.status = importedCount === 0 && runtimeErrors.length > 0 ? 'failed' : 'done';
+  job.status = importedCount === 0 && skippedCount === 0 && runtimeErrors.length > 0 ? 'failed' : 'done';
   job.confirmedBy = toObjectId(ctx.userId);
   job.summary = {
     ...(job.summary || {}),
     totalRows: rows.length,
     importedCount,
+    skippedCount,
     errorCount: runtimeErrors.length,
   };
   await job.save();
@@ -508,7 +503,7 @@ export async function confirmImportJob(
     action: 'migration.imported',
     targetType: 'importJob',
     targetId: job._id,
-    meta: { type: job.type, importedCount, errorCount: runtimeErrors.length },
+    meta: { type: job.type, importedCount, skippedCount, errorCount: runtimeErrors.length },
   });
 
   return job;

@@ -457,7 +457,7 @@ export function createAutomationWorker(): Worker {
               templateId: membershipAuto.templateId,
               variables: [cust.name, plan.planSnap?.name || 'Membership', plan.validTill],
               text,
-              isMarketing: true,
+              isMarketing: false, // service notice: not counted against the daily marketing cap
               todayDateStr,
               maxMarketingPerDay,
             });
@@ -491,7 +491,7 @@ export function createAutomationWorker(): Worker {
               templateId: packageLastAuto.templateId,
               variables: [cust.name, plan.planSnap?.name || 'Package', plan.validTill],
               text,
-              isMarketing: true,
+              isMarketing: false, // service notice: not counted against the daily marketing cap
               todayDateStr,
               maxMarketingPerDay,
             });

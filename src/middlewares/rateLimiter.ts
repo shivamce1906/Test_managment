@@ -57,7 +57,10 @@ export const standardRateLimiter = rateLimit({
 
 export const authRateLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 5, // 5 attempts per minute per IP
+  max: 5, // 5 failed attempts per minute per IP
+  // Only failed logins count: staff sharing one internet connection are not blocked when they
+  // type the right password. The per-account lockout (5 wrong passwords -> 15 min) still applies.
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   store: new RedisRateLimitStore('rl:auth:'),

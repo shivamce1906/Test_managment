@@ -458,21 +458,38 @@ export class CatalogueService {
     };
   }
 
+  /**
+   * Base prices need catalogue access. One branch's prices may also be changed by a manager with
+   * editBranchPrices, for a branch they manage (same rule as PATCH /services/:id/branch-prices).
+   */
+  private assertBulkPriceAccess(ctx: RequestContext, branchId?: string) {
+    const allowed = branchId
+      ? hasPermission(ctx, 'manageCatalogue') || hasPermission(ctx, 'editBranchPrices')
+      : hasPermission(ctx, 'manageCatalogue');
+    if (!allowed) {
+      throw new AppError(403, 'FORBIDDEN', 'You do not have permission to change these prices');
+    }
+    if (branchId && ctx.role === 'manager' && !ctx.branchIds.includes(branchId)) {
+      throw new AppError(403, 'FORBIDDEN', 'You can only manage prices for your own branches');
+    }
+  }
+
+  /** Services of a category and of its sub-categories (FR-SVC-05 "for a category"). */
+  private async bulkPriceServices(businessId: Types.ObjectId, categoryId: string) {
+    const catId = toObjectId(categoryId);
+    const childIds = await Category.find({ businessId, parentId: catId }).distinct('_id');
+    return Service.find({ businessId, categoryId: { $in: [catId, ...childIds] } }).sort({ name: 1 });
+  }
+
   async previewBulkPriceChange(
     ctx: RequestContext,
     categoryId: string,
     changeBps: number,
     branchId?: string
   ): Promise<any[]> {
-    if (!hasPermission(ctx, 'manageCatalogue')) {
-      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can preview bulk price changes');
-    }
-    if (branchId && ctx.role === 'manager' && !ctx.branchIds.includes(branchId)) {
-      throw new AppError(403, 'FORBIDDEN', 'You can only manage prices for your own branches');
-    }
-
+    this.assertBulkPriceAccess(ctx, branchId);
     const businessId = toObjectId(ctx.businessId!);
-    const services = await Service.find({ businessId, categoryId: toObjectId(categoryId) }).sort({ name: 1 });
+    const services = await this.bulkPriceServices(businessId, categoryId);
     return services.map((svc) => this.computeBulkPriceTransition(svc, changeBps, branchId));
   }
 
@@ -482,15 +499,9 @@ export class CatalogueService {
     changeBps: number,
     branchId?: string
   ): Promise<{ updatedCount: number; changes: any[] }> {
-    if (!hasPermission(ctx, 'manageCatalogue')) {
-      throw new AppError(403, 'FORBIDDEN', 'Only the owner (or a manager with catalogue access) can apply bulk price changes');
-    }
-    if (branchId && ctx.role === 'manager' && !ctx.branchIds.includes(branchId)) {
-      throw new AppError(403, 'FORBIDDEN', 'You can only manage prices for your own branches');
-    }
-
+    this.assertBulkPriceAccess(ctx, branchId);
     const businessId = toObjectId(ctx.businessId!);
-    const services = await Service.find({ businessId, categoryId: toObjectId(categoryId) }).sort({ name: 1 });
+    const services = await this.bulkPriceServices(businessId, categoryId);
     const changes: any[] = [];
 
     for (const svc of services) {

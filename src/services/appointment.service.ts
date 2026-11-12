@@ -728,6 +728,8 @@ export class AppointmentService {
       reason: data.reason,
     });
     await block.save();
+    // Open calendars of this branch and day refetch (GET /changes)
+    await notificationService.bumpScope(businessId.toString(), `appointments:${branchId.toString()}:${getBusinessDate(block.start)}`);
 
     await auditService.logAction({
       ctx,
@@ -743,10 +745,11 @@ export class AppointmentService {
 
   async deleteStaffBlock(ctx: RequestContext, branchIdStr: string, blockId: string): Promise<void> {
     const businessId = toObjectId(ctx.businessId!);
-    const res = await StaffBlock.deleteOne({ _id: toObjectId(blockId), businessId, branchId: toObjectId(branchIdStr) });
-    if (res.deletedCount === 0) {
+    const block = await StaffBlock.findOneAndDelete({ _id: toObjectId(blockId), businessId, branchId: toObjectId(branchIdStr) });
+    if (!block) {
       throw new AppError(404, 'NOT_FOUND', 'Staff block not found');
     }
+    await notificationService.bumpScope(businessId.toString(), `appointments:${block.branchId.toString()}:${getBusinessDate(block.start)}`);
   }
 
   async getAppointmentById(ctx: RequestContext, id: string): Promise<any> {

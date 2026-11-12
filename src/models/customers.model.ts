@@ -18,7 +18,8 @@ export interface ICustomer extends Document {
     state: string;
     pincode: string;
   };
-  source: 'walk_in' | 'phone' | 'whatsapp' | 'referral';
+  /** 'import' is set only by the Super Admin data import (not selectable in the API) */
+  source: 'walk_in' | 'phone' | 'whatsapp' | 'referral' | 'import';
   referredBy?: Types.ObjectId;
   tags: string[];
   waOptIn: boolean;
@@ -65,7 +66,7 @@ const customerSchema = new Schema<ICustomer>(
       state: { type: String },
       pincode: { type: String },
     },
-    source: { type: String, enum: ['walk_in', 'phone', 'whatsapp', 'referral'], default: 'walk_in', required: true },
+    source: { type: String, enum: ['walk_in', 'phone', 'whatsapp', 'referral', 'import'], default: 'walk_in', required: true },
     referredBy: { type: Schema.Types.ObjectId, ref: 'customers' },
     tags: [{ type: String }],
     waOptIn: { type: Boolean, default: true, required: true },

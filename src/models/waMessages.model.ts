@@ -13,8 +13,10 @@ export interface IWaMessage extends Document {
   variables?: string[];
   mediaKey?: string;
   mediaUrl?: string;
+  /** image | video | audio | document | sticker (incoming media). */
+  mediaType?: string;
   senderName?: string;
-  status: 'queued' | 'sent' | 'delivered' | 'read' | 'failed';
+  status:'queued' | 'sent' | 'delivered' | 'read' | 'failed';
   error?: string;
   costPaise?: number;
   origin: 'inbox' | 'campaign' | 'automation' | 'transactional';
@@ -36,6 +38,7 @@ const waMessageSchema = new Schema<IWaMessage>(
     variables: [{ type: String }],
     mediaKey: { type: String },
     mediaUrl: { type: String },
+    mediaType: { type: String },
     senderName: { type: String },
     status: {
       type: String,

@@ -14,6 +14,8 @@ export interface ICampaign extends Document {
     segment?: Record<string, any>;
     segmentCriteria?: Record<string, any>;
     customerIds?: Types.ObjectId[];
+    /** Segment audiences: customers the owner unticked; never messaged. */
+    excludeCustomerIds?: Types.ObjectId[];
     uploadKey?: string;
   };
   variableMap: Record<string, string>;
@@ -52,6 +54,7 @@ const campaignSchema = new Schema<ICampaign>(
       segment: { type: Schema.Types.Mixed },
       segmentCriteria: { type: Schema.Types.Mixed },
       customerIds: [{ type: Schema.Types.ObjectId, ref: 'customers' }],
+      excludeCustomerIds: [{ type: Schema.Types.ObjectId, ref: 'customers' }],
       uploadKey: { type: String },
     },
     variableMap: { type: Schema.Types.Mixed, default: {} },

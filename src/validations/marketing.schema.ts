@@ -35,6 +35,13 @@ export const previewSegmentSchema = z.object({
   criteria: segmentCriteriaSchema,
 });
 
+/** One page of the customers a criteria matches (the broadcast studio's ledger), with search. */
+export const previewSegmentCustomersSchema = previewSegmentSchema.extend({
+  page: z.number().int().min(1).default(1),
+  limit: z.number().int().min(1).max(100).default(25),
+  q: z.string().trim().max(60).optional(),
+});
+
 export const createOfferSchema = z.object({
   code: z
     .string()
@@ -94,6 +101,8 @@ export const createMarketingCampaignSchema = z.object({
     segmentId: objectIdSchema.optional(),
     segmentCriteria: segmentCriteriaSchema.optional(),
     customerIds: z.array(objectIdSchema).optional(),
+    /** Segment audiences only: everyone the criteria matches except these customers. */
+    excludeCustomerIds: z.array(objectIdSchema).max(5000).optional(),
     uploadKey: z.string().optional(),
   }),
   variableMap: z.record(z.string()).default({}),

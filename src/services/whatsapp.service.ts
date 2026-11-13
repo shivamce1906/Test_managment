@@ -650,6 +650,8 @@ export async function processInboundWebhook(
     providerMessageId?: string;
     status?: string;
     mediaUrl?: string;
+    /** image | video | audio | document | sticker, when mediaUrl is set. */
+    mediaType?: string;
     senderName?: string;
     providerChatId?: string;
     /** When the customer sent it (providers replay old messages); defaults to now. */
@@ -658,6 +660,7 @@ export async function processInboundWebhook(
 ) {
   const waNum = await findWaNumberForWebhook(numberId);
   if (!waNum) return;
+  const storable = Boolean(payload.text || payload.mediaUrl);
   const now = new Date();
   const sentAt = payload.sentAt && !Number.isNaN(payload.sentAt.getTime()) && payload.sentAt < now ? payload.sentAt : now;
   const later = (a: Date | undefined) => (a && a > sentAt ? a : sentAt);
@@ -677,6 +680,10 @@ export async function processInboundWebhook(
     });
     if (existing) return;
   }
+
+  // Nothing to store: leave the chat alone. A message we can't store is never seen as a duplicate,
+  // so counting it would add one unread every time the provider replays its chat list.
+  if (!storable) return;
 
   // 3. Find or link Customer / Lead
   const customer = await Customer.findOne({ businessId: waNum.businessId, phone });
@@ -747,7 +754,7 @@ export async function processInboundWebhook(
   }
 
   // 5. Create inbound message
-  if (payload.text || payload.mediaUrl) {
+  if (storable) {
     const msg = await WaMessage.create({
       businessId: waNum.businessId,
       conversationId: conv._id,
@@ -756,6 +763,7 @@ export async function processInboundWebhook(
       kind: payload.mediaUrl ? 'media' : 'text',
       text: payload.text,
       mediaUrl: payload.mediaUrl,
+      mediaType: payload.mediaUrl ? payload.mediaType : undefined,
       senderName: payload.senderName,
       status: 'delivered',
       origin: 'inbox',

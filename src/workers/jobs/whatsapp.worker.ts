@@ -350,6 +350,8 @@ export function createCampaignWorker(): Worker {
             waOptIn: { $ne: false },
           }).distinct('_id');
         }
+        const unticked = new Set((campaign.audience.excludeCustomerIds || []).map((id) => id.toString()));
+        if (unticked.size) customerIds = customerIds.filter((id) => !unticked.has(id.toString()));
       } else if (campaign.audience?.kind === 'selection' && campaign.audience.customerIds) {
         customerIds = await Customer.find({
           _id: { $in: campaign.audience.customerIds },

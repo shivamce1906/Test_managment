@@ -50,6 +50,14 @@ export class MarketingCampaignService {
       const preview = await segmentationService.previewSegment(ctx, segmentCriteria || {});
       totalAudience = preview.eligibleForWa;
       excluded = preview.excludedOptOut;
+      const unticked = (input.audience.excludeCustomerIds || []).map(toObjectId);
+      if (unticked.length) {
+        // Only the unticked customers the criteria really matches come off the count
+        const filter = await segmentationService.buildCustomerFilter(businessId, segmentCriteria || {}, { enforceWaEligibility: true });
+        const removed = await Customer.countDocuments({ ...filter, _id: { $in: unticked } });
+        totalAudience -= removed;
+        excluded += removed;
+      }
     } else if (input.audience.kind === 'selection') {
       const rawIds = (input.audience.customerIds || []).map(toObjectId);
       const eligible = await Customer.find({
@@ -76,6 +84,8 @@ export class MarketingCampaignService {
         segmentId: input.audience.segmentId ? toObjectId(input.audience.segmentId) : undefined,
         segmentCriteria,
         customerIds: (input.audience.customerIds || []).map(toObjectId),
+        excludeCustomerIds:
+          input.audience.kind === 'segment' ? (input.audience.excludeCustomerIds || []).map(toObjectId) : [],
         uploadKey: input.audience.uploadKey,
       },
       variableMap: input.variableMap || {},

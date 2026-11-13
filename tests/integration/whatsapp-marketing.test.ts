@@ -26,7 +26,7 @@ import http from 'http';
 import { AddressInfo } from 'net';
 import { io as ioClient, Socket } from 'socket.io-client';
 import { useTestDb } from '../helpers/db';
-import { app, as, createPlatformAdmin, createUser, platformToken, seedWorld, serviceLine, tokenFor, World } from '../helpers/factory';
+import { app, as, createCustomer, createPlatformAdmin, createUser, platformToken, seedWorld, serviceLine, tokenFor, World } from '../helpers/factory';
 import { Bill, Campaign, MarketingOffer, User, WaConversation, WaMessage, WaNumber, WaTemplate } from '../../src/models';
 import { processInboundWebhook, reconnectAllWaNumbers } from '../../src/services/whatsapp.service';
 import { instantBroadcastSocket } from '../../src/integrations/instantbroadcast/instantbroadcast.socket';
@@ -326,6 +326,34 @@ describe('Marketing segments and campaigns: access', () => {
     expect((await as(w.tokens.branchA).get('/marketing/campaigns')).status).toBe(403);
     expect((await as(w.tokens.branchA).get('/marketing/segments')).status).toBe(403);
   });
+
+  it('the broadcast ledger pages and searches matching customers; unticked ones are left out of the audience', async () => {
+    const { number, template } = await waSetup(w);
+    const meera = await createCustomer(w.business._id, { name: 'Meera Singhania', phone: '+919811032908' });
+    const rhea = await createCustomer(w.business._id, { name: 'Rhea Mehta', phone: '+919769281140' });
+    await createCustomer(w.business._id, { name: 'Opted Out', phone: '+919800000099', waOptIn: false });
+
+    const page = (body: object) => as(w.tokens.owner).post('/marketing/segments/preview/customers', { criteria: { customerType: 'all' }, ...body });
+    const all = await page({ page: 1, limit: 2 });
+    expect(all.status).toBe(200);
+    expect(all.body.total).toBe(3); // the seeded customer, Meera, Rhea; never the opted-out one
+    expect(all.body.customers).toHaveLength(2);
+    expect((await page({ page: 2, limit: 2 })).body.customers).toHaveLength(1);
+    expect((await page({ q: 'meera' })).body.customers.map((c: any) => c.name)).toEqual(['Meera Singhania']);
+    expect((await page({ q: '97692 81' })).body.customers.map((c: any) => c.name)).toEqual(['Rhea Mehta']);
+    expect((await page({ q: 'opted' })).body.total).toBe(0);
+    expect((await as(w.tokens.branchA).post('/marketing/segments/preview/customers', { criteria: {} })).status).toBe(403);
+
+    const camp = await as(w.tokens.owner).post('/marketing/campaigns', {
+      name: 'All but Meera', numberId: number._id.toString(), templateId: template._id.toString(),
+      audience: { kind: 'segment', segmentCriteria: { customerType: 'all' }, excludeCustomerIds: [meera._id.toString()] },
+    });
+    expect(camp.status).toBe(201);
+    expect(camp.body.stats.total).toBe(2);
+    const saved = await Campaign.findOne({ _id: camp.body._id, businessId: w.business._id });
+    expect(saved!.audience.excludeCustomerIds!.map(String)).toEqual([meera._id.toString()]);
+    expect(rhea).toBeTruthy();
+  });
 });
 
 describe('WhatsApp across businesses: each owner sees only their own number and chats', () => {
@@ -595,5 +623,32 @@ describe('Instant Broadcast update_chat_list (real payload shape, captured 2026-
     // An outgoing message we never sent (e.g. typed in IB's own dashboard) is not invented
     await ingestChatList(config, [chatItem({ type: 'template', metaChatId: 'wamid.DASH', route: 'OUTGOING', status: 'sent' })]);
     expect(await WaMessage.countDocuments({ businessId: w.business._id, providerMessageId: 'wamid.DASH' })).toBe(0);
+  });
+
+  it('stores an incoming image with its link, and a replayed one never bumps unread again', async () => {
+    const { number } = await waSetup(w);
+    const { ingestChatList } = await import('../../src/integrations/instantbroadcast/instantbroadcast.socket');
+    const config = { uid: 'ib-uid-1', userToken: 'key', businessId: w.business._id.toString(), numberId: number._id.toString() };
+    const link = 'https://instantbroadcast.in/meta-media/abc.jpeg';
+    // Shape seen live 2026-11-13: empty text body, the link under msgContext.image
+    const image = chatItem({
+      type: 'image', metaChatId: 'wamid.IMG1', route: 'INCOMING', status: '',
+      msgContext: { type: 'image', image: { link, caption: 'my hair' } }, text: { body: '' },
+    });
+    await ingestChatList(config, [image]);
+    await ingestChatList(config, [image]); // IB repeats the list after every mark-read
+    await ingestChatList(config, [image]);
+    const msgs = await WaMessage.find({ businessId: w.business._id, providerMessageId: 'wamid.IMG1' });
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({ kind: 'media', mediaUrl: link, mediaType: 'image', text: 'my hair' });
+    const conv = await WaConversation.findOne({ businessId: w.business._id, _id: msgs[0].conversationId });
+    expect(conv!.unread).toBe(1);
+
+    // A type we can't show is stored as a placeholder, so it is counted once too
+    const where = chatItem({ type: 'location', metaChatId: 'wamid.LOC1', route: 'INCOMING', status: '', msgContext: { type: 'location', location: {} }, text: { body: '' } });
+    await ingestChatList(config, [where]);
+    await ingestChatList(config, [where]);
+    expect(await WaMessage.findOne({ businessId: w.business._id, providerMessageId: 'wamid.LOC1' })).toMatchObject({ kind: 'text', text: '[location]' });
+    expect((await WaConversation.findOne({ businessId: w.business._id, _id: conv!._id }))!.unread).toBe(2);
   });
 });

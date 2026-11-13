@@ -4,6 +4,8 @@ import { RequestContext, toObjectId } from './context';
 import { AppError, ErrorCode } from '../utils';
 import { getBusinessDate } from '../utils/dates';
 
+const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 export class SegmentationService {
   /**
    * Helper to compute YYYY-MM-DD offset from today in IST
@@ -396,6 +398,54 @@ export class SegmentationService {
         name: c.name,
         phone: c.phone,
         email: c.email,
+        visits: c.stats?.visits || 0,
+        spendPaise: c.stats?.spendPaise || 0,
+        lastVisit: c.stats?.lastVisit,
+      })),
+      total,
+    };
+  }
+
+  /**
+   * One page of the WhatsApp-eligible customers an unsaved criteria matches, newest visit first,
+   * optionally narrowed by name or phone digits. Feeds the broadcast studio's hand-pick ledger.
+   */
+  async previewSegmentCustomers(
+    ctx: RequestContext,
+    criteria: ISegmentCriteria,
+    options: { page: number; limit: number; q?: string }
+  ): Promise<{ customers: any[]; total: number }> {
+    if (!ctx.businessId) {
+      throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
+    }
+    const businessId = toObjectId(ctx.businessId);
+    const filter: Record<string, any> = await this.buildCustomerFilter(businessId, criteria, { enforceWaEligibility: true });
+    const q = options.q?.trim();
+    if (q) {
+      const digits = q.replace(/\D/g, '');
+      const or: Record<string, any>[] = [{ name: { $regex: escapeRegex(q), $options: 'i' } }];
+      if (digits.length >= 3) or.push({ phone: { $regex: escapeRegex(digits) } });
+      // Keep any $or the criteria already uses: both must hold
+      filter.$and = [...(filter.$and ?? []), { $or: or }];
+    }
+    const page = Math.max(1, options.page);
+    const limit = Math.min(100, Math.max(1, options.limit));
+
+    const [customers, total] = await Promise.all([
+      Customer.find(filter)
+        .select('name phone stats.visits stats.spendPaise stats.lastVisit')
+        .sort({ 'stats.lastVisit': -1, _id: 1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Customer.countDocuments(filter),
+    ]);
+
+    return {
+      customers: customers.map((c: any) => ({
+        id: c._id.toString(),
+        name: c.name,
+        phone: c.phone,
         visits: c.stats?.visits || 0,
         spendPaise: c.stats?.spendPaise || 0,
         lastVisit: c.stats?.lastVisit,

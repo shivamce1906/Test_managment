@@ -77,7 +77,11 @@ export class AuthController {
       }
       const result = await this.authService.rotateRefreshToken(token);
       res.cookie('refreshToken', result.refreshToken, getRefreshCookieOptions());
-      res.json(result);
+      res.json({
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        newRefreshToken: result.refreshToken,
+      });
     } catch (err) {
       next(err);
     }

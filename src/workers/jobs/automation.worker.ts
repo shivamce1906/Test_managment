@@ -13,11 +13,12 @@ import {
   WaMessage,
   WaNumber,
   WaTemplate,
+  Campaign,
 } from '../../models';
 import { logger, getBusinessDate, addDays, formatIstTime } from '../../utils';
 import { toObjectId } from '../../services';
 import { defaultChatBranchId } from '../../services/whatsapp.service';
-import { whatsappSendQueue } from '../queues';
+import { whatsappSendQueue, campaignSendQueue } from '../queues';
 
 function parseClockMinutes(hhmm: string | undefined, fallback: number): number {
   if (!hhmm || !/^\d{1,2}:\d{2}$/.test(hhmm)) return fallback;
@@ -191,6 +192,26 @@ export function createAutomationWorker(): Worker {
 
         const automations = await Automation.find({ businessId: bId });
         const autoByKey = new Map(automations.map((a) => [a.key, a]));
+
+        // Dispatch any overdue scheduled campaigns that were missed (reconciliation)
+        try {
+          const dueCampaigns = await Campaign.find({
+            businessId: bId,
+            status: 'scheduled',
+            scheduledAt: { $lte: now },
+          });
+
+          for (const camp of dueCampaigns) {
+            await campaignSendQueue().add(
+              'send',
+              { campaignId: camp._id.toString(), businessId: bId.toString() },
+              { jobId: `campaign_scan_${camp._id}_${Date.now()}` }
+            );
+            logger.info({ campaignId: camp._id, businessId: bId }, 'Recovered and dispatched due scheduled campaign in automation scan');
+          }
+        } catch (campErr) {
+          logger.warn({ err: campErr, businessId: bId }, 'Notice: Error scanning due scheduled campaigns');
+        }
 
         // 1. 24h & 2h Appointment Reminders (transactional: honor each Automation.enabled flag)
         const rem24Auto = autoByKey.get('reminder_24h');

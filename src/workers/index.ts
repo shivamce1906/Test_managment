@@ -15,6 +15,8 @@ import {
 } from './jobs/maintenance.worker';
 import { createPdfWorker } from './jobs/pdf.worker';
 import { setupSchedulers } from './scheduler';
+import { Campaign } from '../models';
+import { campaignSendQueue } from './queues';
 
 export * from './queues';
 export * from './scheduler';
@@ -48,6 +50,26 @@ export async function startBackgroundWorkers(): Promise<Worker[]> {
   ];
 
   await setupSchedulers();
+
+  // Optimistic startup dispatch: dispatch any overdue scheduled campaigns immediately
+  try {
+    const overdueCampaigns = await Campaign.find({
+      status: 'scheduled',
+      scheduledAt: { $lte: new Date() },
+    });
+    for (const c of overdueCampaigns) {
+      await campaignSendQueue().add(
+        'send',
+        { campaignId: c._id.toString(), businessId: c.businessId.toString() },
+        { jobId: `campaign_startup_${c._id}_${Date.now()}` }
+      );
+    }
+    if (overdueCampaigns.length > 0) {
+      logger.info({ count: overdueCampaigns.length }, 'Dispatched overdue scheduled campaigns on worker startup');
+    }
+  } catch (startupErr) {
+    logger.warn({ err: startupErr }, 'Notice: Overdue scheduled campaigns dispatch on startup had error');
+  }
 
   isWorkerRunning = true;
   logger.info(`Initialized ${activeWorkers.length} BullMQ worker processes successfully`);

@@ -315,7 +315,7 @@ export function createCampaignWorker(): Worker {
           await campaignSendQueue().add(
             'send',
             { campaignId: campaign._id.toString(), businessId: bId.toString() },
-            { delay: delayMs, jobId: `campaign:${campaign._id}:resume:${Date.now()}` }
+            { delay: delayMs, jobId: `campaign_resume_${campaign._id}_${Date.now()}` }
           );
         } catch (err) {
           logger.warn({ err, campaignId }, 'Could not re-queue campaign after quiet hours');

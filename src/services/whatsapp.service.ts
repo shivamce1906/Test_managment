@@ -30,7 +30,7 @@ import {
   getRedisClient,
 } from '../integrations';
 import { emitToBranch } from '../socket';
-import { whatsappSendQueue } from '../workers/queues';
+import { whatsappSendQueue, campaignSendQueue } from '../workers/queues';
 import { z } from 'zod';
 import {
   configureWaNumberSchema,
@@ -367,6 +367,52 @@ export async function sendMessage(
       throw new AppError(422, ErrorCode.TEMPLATE_NOT_APPROVED, 'Template not found or not approved');
     }
     templateName = tmpl.name;
+  }
+
+  // Handle scheduled message dispatch (optimistic delayed queue)
+  const scheduledDate = input.scheduledAt ? new Date(input.scheduledAt) : undefined;
+  const isScheduled = !!scheduledDate && !Number.isNaN(scheduledDate.getTime()) && scheduledDate.getTime() > Date.now();
+
+  if (isScheduled && scheduledDate) {
+    const message = await WaMessage.create({
+      businessId: ctx.businessId,
+      conversationId: conv._id,
+      direction: 'out',
+      kind: input.templateId ? 'template' : 'text',
+      text: input.text,
+      templateId: input.templateId ? new Types.ObjectId(input.templateId) : undefined,
+      variables: input.variables,
+      status: 'queued',
+      origin: 'inbox',
+      sentBy: ctx.userId,
+      createdBy: ctx.userId,
+      updatedBy: ctx.userId,
+    });
+
+    conv.lastMessageAt = new Date();
+    await conv.save();
+
+    const delay = Math.max(0, scheduledDate.getTime() - Date.now());
+    try {
+      await whatsappSendQueue().add(
+        'send',
+        { messageId: message._id.toString() },
+        { delay, jobId: message._id.toString() }
+      );
+    } catch (err: any) {
+      logger.warn({ err, messageId: message._id }, 'Notice: whatsappSendQueue delayed add failed');
+    }
+
+    // Notify frontend clients via socket (optimistic UI update)
+    emitToBranch(ctx.businessId.toString(), conv.branchId.toString(), 'wa:new_message', {
+      conversationId: conv._id,
+      message,
+    });
+
+    const redis = getRedisClient();
+    await redis.incr(`chg:${ctx.businessId}:whatsapp`);
+
+    return message;
   }
 
   const sendResult = await sendInstantBroadcastMessage({
@@ -947,6 +993,9 @@ export async function createCampaign(
     excluded = totalAll - totalAudience;
   }
 
+  const scheduledDate = input.scheduledAt ? new Date(input.scheduledAt) : undefined;
+  const isScheduled = !!scheduledDate && !Number.isNaN(scheduledDate.getTime());
+
   const campaign = await Campaign.create({
     businessId: ctx.businessId,
     name: input.name,
@@ -956,12 +1005,27 @@ export async function createCampaign(
       ...input.audience,
     },
     variableMap: input.variableMap,
-    status: input.scheduledAt ? 'scheduled' : 'draft',
-    scheduledAt: input.scheduledAt ? new Date(input.scheduledAt) : undefined,
+    status: isScheduled ? 'scheduled' : 'draft',
+    scheduledAt: scheduledDate,
     stats: { total: totalAudience, sent: 0, delivered: 0, read: 0, failed: 0, excluded, costPaise: 0 },
     createdBy: ctx.userId,
     updatedBy: ctx.userId,
   });
+
+  // Schedule BullMQ job if scheduledAt is provided
+  if (isScheduled && scheduledDate) {
+    try {
+      const delay = Math.max(0, scheduledDate.getTime() - Date.now());
+      await campaignSendQueue().add(
+        'send',
+        { campaignId: campaign._id.toString(), businessId: ctx.businessId.toString() },
+        { delay, jobId: `campaign_${campaign._id}_${Date.now()}` }
+      );
+      logger.info({ campaignId: campaign._id, delay }, 'Scheduled campaign enqueued to BullMQ');
+    } catch (err: any) {
+      logger.warn({ err, campaignId: campaign._id }, 'Notice: BullMQ campaignSendQueue add failed');
+    }
+  }
 
   await logAction({
     businessId: ctx.businessId,

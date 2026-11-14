@@ -140,7 +140,7 @@ export class InstantBroadcastAdapter {
       return { verified: true };
     }
     try {
-      const url = `${this.baseUrl}/api/v1/templates?token=${encodeURIComponent(userToken)}`;
+      const url = `${this.baseUrl}/api/user/get_my_meta_templets?token=${encodeURIComponent(userToken)}`;
       const response = await fetch(url, {
         headers: {
           Authorization: `Bearer ${userToken}`,
@@ -169,8 +169,9 @@ export class InstantBroadcastAdapter {
 
     if (userToken && userToken !== 'mock-aisensy-key' && userToken !== 'key' && !userToken.startsWith('mock')) {
       const candidateUrls = [
+        `${this.baseUrl}/api/user/get_my_meta_templets?token=${encodeURIComponent(userToken)}`,
+        `${this.baseUrl}/api/templet/get_templets?token=${encodeURIComponent(userToken)}`,
         `${this.baseUrl}/api/v1/templates?token=${encodeURIComponent(userToken)}`,
-        `${this.baseUrl}/api/v1/get_templets?token=${encodeURIComponent(userToken)}`,
       ];
       for (const url of candidateUrls) {
         try {
@@ -189,8 +190,37 @@ export class InstantBroadcastAdapter {
           if (response.ok) {
             const data: any = await response.json();
             const list = Array.isArray(data) ? data : data.templates || data.data;
-            if (Array.isArray(list)) {
-              return list;
+            if (Array.isArray(list) && list.length > 0) {
+              return list.map((t: any) => {
+                let body = t.body || '';
+                let variables: string[] = Array.isArray(t.variables) ? t.variables : [];
+                if (Array.isArray(t.components)) {
+                  const bodyComp = t.components.find((c: any) => c.type === 'BODY');
+                  if (bodyComp?.text) {
+                    body = bodyComp.text;
+                  }
+                  if (bodyComp?.example?.body_text?.[0]) {
+                    variables = bodyComp.example.body_text[0];
+                  } else {
+                    const matches = body.match(/\{\{(\d+)\}\}/g);
+                    if (matches) {
+                      variables = matches.map((m: string) => m.replace(/[\{\}]/g, ''));
+                    }
+                  }
+                }
+                const cat = (t.category || 'utility').toLowerCase();
+                const category = ['marketing', 'utility', 'authentication'].includes(cat) ? cat : 'utility';
+                const rawStatus = (t.status || 'pending').toLowerCase();
+                const status = rawStatus === 'approved' ? 'approved' : rawStatus === 'rejected' ? 'rejected' : 'pending';
+                return {
+                  name: t.name,
+                  language: t.language || 'en',
+                  category,
+                  body,
+                  variables,
+                  status,
+                };
+              });
             }
           }
           logger.warn({ url, status: response.status }, 'Instant Broadcast did not return a template list');
@@ -198,7 +228,6 @@ export class InstantBroadcastAdapter {
           logger.warn({ url, err: err.message }, 'Failed to fetch templates from live Instant Broadcast endpoint');
         }
       }
-      // A live account never gets the sample templates below: Meta would reject them
       return [];
     }
 

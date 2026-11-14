@@ -24,6 +24,7 @@ export const sendWaMessageSchema = z.object({
   text: z.string().min(1).optional(),
   templateId: objectIdSchema.optional(),
   variables: z.array(z.string()).optional(),
+  scheduledAt: z.string().datetime().optional(),
 }).refine((data) => data.text || data.templateId, {
   message: 'Either text or templateId must be provided',
 });

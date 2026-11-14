@@ -1,7 +1,7 @@
 import { Types } from 'mongoose';
 import { Campaign, ICampaign, WaNumber, WaTemplate, MarketingOffer, MarketingSegment, Customer } from '../models';
 import { RequestContext, toObjectId } from './context';
-import { AppError, ErrorCode } from '../utils';
+import { AppError, ErrorCode, logger } from '../utils';
 import { logAction } from './audit.service';
 import { segmentationService } from './segmentation.service';
 import { campaignSendQueue } from '../workers/queues';
@@ -112,10 +112,10 @@ export class MarketingCampaignService {
         await campaignSendQueue().add(
           'send',
           { campaignId: campaign._id.toString(), businessId: businessId.toString() },
-          { delay, jobId: `campaign:${campaign._id}` }
+          { delay, jobId: `campaign_${campaign._id}_${Date.now()}` }
         );
       } catch (err: any) {
-        // Safe fallback in test or offline Redis environments
+        logger.warn({ err, campaignId: campaign._id }, 'Notice: BullMQ campaignSendQueue.add failed');
       }
     }
 
@@ -218,10 +218,10 @@ export class MarketingCampaignService {
       await campaignSendQueue().add(
         'send',
         { campaignId: campaign._id.toString(), businessId: businessId.toString() },
-        { delay, jobId: `campaign:${campaign._id}:${Date.now()}` }
+        { delay, jobId: `campaign_${campaign._id}_${Date.now()}` }
       );
     } catch (err: any) {
-      // Safe fallback in test or offline Redis environments
+      logger.warn({ err, campaignId: campaign._id }, 'Notice: BullMQ campaignSendQueue.add failed');
     }
 
     return campaign;
@@ -248,10 +248,10 @@ export class MarketingCampaignService {
       await campaignSendQueue().add(
         'send',
         { campaignId: campaign._id.toString(), businessId: businessId.toString() },
-        { jobId: `campaign:${campaign._id}:${Date.now()}` }
+        { jobId: `campaign_${campaign._id}_${Date.now()}` }
       );
     } catch (err: any) {
-      // Safe fallback in test or offline Redis environments
+      logger.warn({ err, campaignId: campaign._id }, 'Notice: BullMQ campaignSendQueue.add failed');
     }
 
     return campaign;

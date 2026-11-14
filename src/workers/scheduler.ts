@@ -12,10 +12,10 @@ import { logger } from '../utils';
 export async function setupSchedulers(): Promise<void> {
   logger.info('Initializing BullMQ recurring job schedules (Asia/Kolkata)...');
 
-  // Automation scan every 15 minutes
+  // Automation scan every 5 minutes (IST)
   await automationScanQueue().upsertJobScheduler(
     'automation-scan-scheduler',
-    { pattern: '*/15 * * * *', tz: 'Asia/Kolkata' },
+    { pattern: '*/5 * * * *', tz: 'Asia/Kolkata' },
     {
       name: 'scan',
       data: { scheduled: true },

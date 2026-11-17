@@ -1002,47 +1002,58 @@ export class BillingService {
         }
       } else if (l.kind === 'product') {
         // Retail product stock deduction, at purchase cost (for margin reports)
-        const prod = await Product.findOne({ _id: l.refId, businessId }).select('purchasePricePaise unitsPerPurchase').session(session || null);
+        const prod = await Product.findOne({ _id: l.refId, businessId }).select('purchasePricePaise unitsPerPurchase type').session(session || null);
         const unitCost = prod ? (prod.purchasePricePaise || 0) / (prod.unitsPerPurchase || 1) : 0;
-        await new StockMovement({
-          businessId,
-          branchId,
-          productId: l.refId,
-          pool: 'retail',
-          type: 'sale',
-          qty: -l.qty,
-          costPaise: Math.round(unitCost * l.qty),
-          refType: 'bill',
-          refId: bill._id,
-          businessDate,
-        }).save({ session });
+        const poolsToDeduct: ('retail' | 'consumable')[] =
+          prod?.type === 'both' ? ['retail', 'consumable'] : ['retail'];
 
-        await StockBalance.findOneAndUpdate(
-          { businessId, branchId, productId: l.refId, pool: 'retail' },
-          { $inc: { qty: -l.qty }, $set: { lastMovementAt: new Date() } },
-          { upsert: true, session }
-        );
-      } else if (l.kind === 'service' && l.consumablesUsed) {
-        // Auto-deduct consumables used in service (BR-07)
-        for (const c of l.consumablesUsed) {
+        for (const pool of poolsToDeduct) {
           await new StockMovement({
             businessId,
             branchId,
-            productId: c.productId,
-            pool: 'consumable',
-            type: 'service_use',
-            qty: -c.qty,
-            costPaise: c.costPaise || 0,
+            productId: l.refId,
+            pool,
+            type: 'sale',
+            qty: -l.qty,
+            costPaise: Math.round(unitCost * l.qty),
             refType: 'bill',
             refId: bill._id,
             businessDate,
           }).save({ session });
 
           await StockBalance.findOneAndUpdate(
-            { businessId, branchId, productId: c.productId, pool: 'consumable' },
-            { $inc: { qty: -c.qty }, $set: { lastMovementAt: new Date() } },
+            { businessId, branchId, productId: l.refId, pool },
+            { $inc: { qty: -l.qty }, $set: { lastMovementAt: new Date() } },
             { upsert: true, session }
           );
+        }
+      } else if (l.kind === 'service' && l.consumablesUsed) {
+        // Auto-deduct consumables used in service (BR-07)
+        for (const c of l.consumablesUsed) {
+          const cProd = await Product.findOne({ _id: c.productId, businessId }).select('type').session(session || null);
+          const poolsToDeduct: ('consumable' | 'retail')[] =
+            cProd?.type === 'both' ? ['consumable', 'retail'] : ['consumable'];
+
+          for (const pool of poolsToDeduct) {
+            await new StockMovement({
+              businessId,
+              branchId,
+              productId: c.productId,
+              pool,
+              type: 'service_use',
+              qty: -c.qty,
+              costPaise: c.costPaise || 0,
+              refType: 'bill',
+              refId: bill._id,
+              businessDate,
+            }).save({ session });
+
+            await StockBalance.findOneAndUpdate(
+              { businessId, branchId, productId: c.productId, pool },
+              { $inc: { qty: -c.qty }, $set: { lastMovementAt: new Date() } },
+              { upsert: true, session }
+            );
+          }
         }
       }
     }

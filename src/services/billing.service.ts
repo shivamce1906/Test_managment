@@ -322,6 +322,7 @@ export class BillingService {
           hsnSac: '9983',
           qty: raw.qty || 1,
           unitPricePaise,
+          allowBillDiscount: raw.allowBillDiscount,
           lineDiscount: raw.lineDiscount,
           staff,
           consumablesUsed: (svc.consumables || []).map((c) => {
@@ -350,6 +351,7 @@ export class BillingService {
           hsnSac: prod.hsn || '3305',
           qty: raw.qty || 1,
           unitPricePaise,
+          allowBillDiscount: raw.allowBillDiscount,
           lineDiscount: raw.lineDiscount,
           staff,
           gstBps: prod.gstBps,
@@ -365,6 +367,7 @@ export class BillingService {
           name: plan.name,
           qty: 1,
           unitPricePaise: plan.pricePaise,
+          allowBillDiscount: raw.allowBillDiscount,
           lineDiscount: raw.lineDiscount,
         });
       }

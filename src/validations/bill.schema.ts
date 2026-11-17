@@ -5,6 +5,7 @@ export const billLineInputSchema = z.object({
   kind: z.enum(['service', 'product', 'membership', 'package', 'wallet_topup', 'voucher']),
   refId: objectIdSchema,
   qty: z.number().int().positive().default(1),
+  allowBillDiscount: z.boolean().optional(),
   lineDiscount: z.object({
     type: z.enum(['amount', 'pct']),
     value: z.number().int().nonnegative(), // paise if amount, bps if pct

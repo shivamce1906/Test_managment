@@ -13,6 +13,7 @@ export interface ComputeLineItem {
   hsnSac?: string;
   qty: number;
   unitPricePaise: number;
+  allowBillDiscount?: boolean;
   lineDiscount?: {
     type: 'amount' | 'pct';
     value: number; // paise if amount, bps if pct
@@ -126,31 +127,45 @@ export function computeBill(input: ComputeBillInput): ComputeBillOutput {
       (r) => r.kind === 'package' && (r.lineId?.toString() === line._id?.toString() || r.lineId === idx.toString())
     );
 
+    // Bill discount eligibility:
+    // By default, services, retail products, and custom items are eligible for checkout discounts.
+    // Memberships, packages, vouchers, and wallet top-ups are excluded by default
+    // to prevent promotional/checkout discounts from eroding fixed-price prepaid assets.
+    // If allowBillDiscount is explicitly provided on the line, that flag takes precedence.
+    const isBillDiscountEligible =
+      line.allowBillDiscount !== undefined
+        ? line.allowBillDiscount
+        : line.kind !== 'membership' && line.kind !== 'package' && line.kind !== 'voucher' && line.kind !== 'wallet_topup';
+
+    const preBillDiscountValue = isPackageRedeemed ? 0 : Math.max(0, grossPaise - lineDiscountPaise - membershipDiscountPaise);
+    const billDiscountBase = isBillDiscountEligible ? preBillDiscountValue : 0;
+
     return {
       ...line,
       grossPaise,
       lineDiscountPaise,
       membershipDiscountPaise,
       isPackageRedeemed,
-      preBillDiscountValue: isPackageRedeemed ? 0 : Math.max(0, grossPaise - lineDiscountPaise - membershipDiscountPaise),
+      preBillDiscountValue,
+      billDiscountBase,
     };
   });
 
-  // 3. Bill discount pro-rata spread
+  // 3. Bill discount pro-rata spread over eligible lines (never memberships, plan sales or wallet top-ups by default)
   let totalBillDiscountPaise = 0;
-  const sumPreBillVal = lineDrafts.reduce((acc, l) => acc + l.preBillDiscountValue, 0);
+  const sumBillDiscountBase = lineDrafts.reduce((acc, l) => acc + l.billDiscountBase, 0);
 
-  if (billDiscount && sumPreBillVal > 0) {
+  if (billDiscount && sumBillDiscountBase > 0) {
     if (billDiscount.type === 'amount') {
-      totalBillDiscountPaise = Math.min(sumPreBillVal, billDiscount.value);
+      totalBillDiscountPaise = Math.min(sumBillDiscountBase, billDiscount.value);
     } else if (billDiscount.type === 'pct') {
-      totalBillDiscountPaise = Math.min(sumPreBillVal, calculateBps(sumPreBillVal, billDiscount.value));
+      totalBillDiscountPaise = Math.min(sumBillDiscountBase, calculateBps(sumBillDiscountBase, billDiscount.value));
     }
   }
 
   const billDiscountShares = distributeProRata(
     totalBillDiscountPaise,
-    lineDrafts.map((l) => l.preBillDiscountValue)
+    lineDrafts.map((l) => l.billDiscountBase)
   );
 
   // 3b. Marketing offer: services and products only (never plan sales or wallet top-ups)

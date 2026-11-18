@@ -1,3 +1,4 @@
+import { clearStatusCache } from './auth.service';
 import { Types } from 'mongoose';
 import {
   Business,
@@ -5,6 +6,7 @@ import {
   BranchRequest,
   User,
   EmailRegistry,
+  Automation,
   withTransaction,
   IBusiness,
   IBranch,
@@ -168,6 +170,30 @@ export class BusinessService {
         { session }
       );
 
+      // 6. Seed all 11 default Automation entries (disabled until owner enables & assigns templates)
+      const AUTOMATION_KEYS = [
+        'booking_confirmation',
+        'reminder_24h',
+        'reminder_2h',
+        'rebooking',
+        'birthday',
+        'anniversary',
+        'winback',
+        'feedback',
+        'review_push',
+        'membership_expiry',
+        'package_last_session',
+      ] as const;
+      await Automation.insertMany(
+        AUTOMATION_KEYS.map((key) => ({
+          businessId,
+          key,
+          enabled: false,
+          settings: {},
+        })),
+        { session }
+      );
+
       return { business, owner: toSafeUser(owner), branch, branchLogin: toSafeUser(branchLogin) };
     });
   }
@@ -184,6 +210,7 @@ export class BusinessService {
     const previousStatus = business.status;
     applyBusinessUpdates(business, updates);
     await business.save();
+    if (business.status !== previousStatus) await clearStatusCache({ businessId: business._id });
 
     if (updates.status === 'suspended' && previousStatus !== 'suspended') {
       // Revoke sessions of all users in the business
@@ -319,6 +346,7 @@ export class BusinessService {
 
     branch.status = 'deactivated';
     await branch.save();
+    await clearStatusCache({ branchId: branch._id });
 
     // Deactivate branch login user and revoke session
     const branchUser = await User.findOne({ branchLoginFor: branchId }, null, { skipTenantScope: true });

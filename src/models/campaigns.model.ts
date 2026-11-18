@@ -14,11 +14,15 @@ export interface ICampaign extends Document {
     segment?: Record<string, any>;
     segmentCriteria?: Record<string, any>;
     customerIds?: Types.ObjectId[];
+    /** Segment audiences: customers the owner unticked; never messaged. */
+    excludeCustomerIds?: Types.ObjectId[];
     uploadKey?: string;
   };
   variableMap: Record<string, string>;
   scheduledAt?: Date;
-  status: 'draft' | 'scheduled' | 'sending' | 'paused' | 'completed' | 'cancelled';
+  /** Set when the campaign worker has queued every message; only then can the campaign be closed. */
+  queuedAt?: Date;
+  status: 'draft' | 'scheduled' | 'sending' | 'paused' | 'completed' | 'cancelled' | 'failed';
   stats: {
     total: number;
     excluded: number;
@@ -50,13 +54,15 @@ const campaignSchema = new Schema<ICampaign>(
       segment: { type: Schema.Types.Mixed },
       segmentCriteria: { type: Schema.Types.Mixed },
       customerIds: [{ type: Schema.Types.ObjectId, ref: 'customers' }],
+      excludeCustomerIds: [{ type: Schema.Types.ObjectId, ref: 'customers' }],
       uploadKey: { type: String },
     },
     variableMap: { type: Schema.Types.Mixed, default: {} },
     scheduledAt: { type: Date },
+    queuedAt: { type: Date },
     status: {
       type: String,
-      enum: ['draft', 'scheduled', 'sending', 'paused', 'completed', 'cancelled'],
+      enum: ['draft', 'scheduled', 'sending', 'paused', 'completed', 'cancelled', 'failed'],
       default: 'draft',
       required: true,
     },

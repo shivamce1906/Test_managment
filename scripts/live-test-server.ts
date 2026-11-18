@@ -86,7 +86,7 @@ async function connectWhatsapp(uri: string) {
   console.log(`Webhook path (needs a public tunnel to use): ${number.webhookUrl}`);
 
   const now = new Date();
-  await db.collection('watemplates').updateOne(
+  await db.collection('waTemplates').updateOne(
     { businessId: business!._id, numberId: new mongoose.Types.ObjectId(String(number._id)), name: TEMPLATE.name },
     { $set: { ...TEMPLATE, status: 'approved', syncedAt: now, updatedAt: now }, $setOnInsert: { createdAt: now } },
     { upsert: true },

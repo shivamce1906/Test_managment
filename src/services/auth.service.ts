@@ -25,6 +25,41 @@ export interface TokenPayload {
   sv: number;
 }
 
+
+/** How long business / branch statuses are cached for the per-request active check. */
+const STATUS_CACHE_SECONDS = 15;
+
+async function cachedStatus(key: string, load: () => Promise<string>): Promise<string> {
+  const redis = getRedisClient();
+  const cached = await redis.get(key).catch(() => null);
+  if (cached) return cached;
+  const status = await load();
+  await redis.set(key, status, 'EX', STATUS_CACHE_SECONDS).catch(() => undefined);
+  return status;
+}
+
+/** A business's status ('missing' when it does not exist), cached briefly in Redis. */
+export function getBusinessStatus(businessId: Types.ObjectId | string): Promise<string> {
+  return cachedStatus(`bstat:${businessId}`, async () => {
+    const b = await Business.findById(businessId).select('status').lean();
+    return b?.status || 'missing';
+  });
+}
+
+/** A branch's status ('missing' when it does not exist), cached briefly in Redis. */
+export function getBranchStatus(branchId: Types.ObjectId | string): Promise<string> {
+  return cachedStatus(`brstat:${branchId}`, async () => {
+    const br = await Branch.findById(branchId, null, { skipTenantScope: true }).select('status').lean();
+    return br?.status || 'missing';
+  });
+}
+
+/** Forget cached statuses right after a business or branch status changes. */
+export async function clearStatusCache(ids: { businessId?: Types.ObjectId | string; branchId?: Types.ObjectId | string }) {
+  const keys = [ids.businessId && `bstat:${ids.businessId}`, ids.branchId && `brstat:${ids.branchId}`].filter(Boolean) as string[];
+  if (keys.length) await getRedisClient().del(...keys).catch(() => undefined);
+}
+
 export class AuthService {
   // Resolved per call: server.ts may swap in the mock client after this service is constructed.
   private get redis() {
@@ -77,7 +112,7 @@ export class AuthService {
   /**
    * Rotates a refresh token.
    */
-  async rotateRefreshToken(refreshTokenString: string): Promise<{ accessToken: string; newRefreshToken: string }> {
+  async rotateRefreshToken(refreshTokenString: string): Promise<{ accessToken: string; refreshToken: string }> {
     const parts = refreshTokenString.split('.');
     if (parts.length !== 3) {
       throw new AppError(401, 'UNAUTHENTICATED', 'Invalid refresh token format');
@@ -85,12 +120,17 @@ export class AuthService {
 
     const [userId, tokenId, secret] = parts;
     const key = `rt:${userId}:${tokenId}`;
+    const usedKey = `rt_used:${userId}:${tokenId}`;
     const storedHash = await this.redis.get(key);
 
     if (!storedHash) {
-      // Possible token reuse attack: revoke all user sessions
-      await this.revokeAllSessions(userId);
-      throw new AppError(401, 'SESSION_REVOKED', 'Refresh token reused or expired, all sessions revoked');
+      // Only revoke all sessions if this specific tokenId was genuinely rotated previously (reuse attack)
+      const wasUsed = await this.redis.get(usedKey);
+      if (wasUsed) {
+        await this.revokeAllSessions(userId);
+        throw new AppError(401, 'SESSION_REVOKED', 'Refresh token reused, all sessions revoked');
+      }
+      throw new AppError(401, 'UNAUTHENTICATED', 'Invalid or expired refresh token');
     }
 
     const isValid = await verifyPassword(secret, storedHash);
@@ -98,18 +138,24 @@ export class AuthService {
       throw new AppError(401, 'UNAUTHENTICATED', 'Invalid refresh token secret');
     }
 
-    // Delete used token (rotation)
-    await this.redis.del(key);
-
-    // Look up user
-    let user = await User.findById(userId, null, { skipTenantScope: true });
-    let admin: IPlatformAdmin | null = null;
+    // Look up user & validate business/branch before consuming token
+    const user = await User.findById(userId, null, { skipTenantScope: true });
     let payload: TokenPayload;
     let role: 'superadmin' | 'owner' | 'manager' | 'branch';
 
     if (user) {
       if (user.status !== 'active') {
         throw new AppError(403, 'ACCOUNT_INACTIVE', 'Account is inactive');
+      }
+      const businessStatus = await getBusinessStatus(user.businessId);
+      if (businessStatus === 'missing' || businessStatus === 'suspended') {
+        throw new AppError(403, 'ACCOUNT_INACTIVE', 'Business account is suspended or inactive');
+      }
+      if (user.role === 'branch' && user.branchLoginFor) {
+        const branchStatus = await getBranchStatus(user.branchLoginFor);
+        if (branchStatus === 'missing' || branchStatus === 'deactivated') {
+          throw new AppError(403, 'ACCOUNT_INACTIVE', 'Branch is deactivated');
+        }
       }
       role = user.role;
       payload = {
@@ -120,7 +166,7 @@ export class AuthService {
         sv: user.sessionVersion,
       };
     } else {
-      admin = await PlatformAdmin.findById(userId);
+      const admin = await PlatformAdmin.findById(userId);
       if (!admin || admin.status !== 'active') {
         throw new AppError(403, 'ACCOUNT_INACTIVE', 'Admin account is inactive');
       }
@@ -133,21 +179,29 @@ export class AuthService {
       };
     }
 
-    const accessToken = this.generateAccessToken(payload);
-    const newRefreshToken = await this.issueRefreshToken(userId, role);
+    // Consume current token & record it as rotated to detect replay attacks
+    await this.redis.del(key);
+    await this.redis.set(usedKey, '1', 'EX', REFRESH_TTLS[role]);
 
-    return { accessToken, newRefreshToken };
+    const accessToken = this.generateAccessToken(payload);
+    const refreshToken = await this.issueRefreshToken(userId, role);
+
+    return { accessToken, refreshToken };
   }
 
   /**
-   * Logs out a session by deleting the refresh token.
+   * Logs out a session by deleting the refresh token without marking it as compromised.
    */
   async logout(refreshTokenString?: string): Promise<void> {
     if (!refreshTokenString) return;
     const parts = refreshTokenString.split('.');
     if (parts.length === 3) {
-      const [userId, tokenId] = parts;
-      await this.redis.del(`rt:${userId}:${tokenId}`);
+      const [userId, tokenId, secret] = parts;
+      const key = `rt:${userId}:${tokenId}`;
+      const storedHash = await this.redis.get(key);
+      if (storedHash && (await verifyPassword(secret, storedHash))) {
+        await this.redis.del(key);
+      }
     }
   }
 

@@ -86,7 +86,16 @@ export function errorHandler(
     });
   }
 
-  // 6. JSON Syntax Error
+  // 6. JSON Syntax Error & Payload Too Large
+  if ((err as any).type === 'entity.too.large' || (err as any).status === 413 || (err as any).statusCode === 413) {
+    return res.status(413).json({
+      error: {
+        code: ErrorCode.BAD_REQUEST,
+        message: 'Request body too large (limit 1MB)',
+      },
+    });
+  }
+
   if (err instanceof SyntaxError && 'body' in err) {
     return res.status(400).json({
       error: {

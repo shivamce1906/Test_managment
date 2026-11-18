@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { AuthService } from '../services';
 import { PlatformAdmin, User } from '../models';
+import { getBusinessStatus, getBranchStatus } from '../services/auth.service';
 import { AppError, ErrorCode } from '../utils';
 import { RequestContext } from '../services';
 
@@ -28,6 +29,9 @@ export function authenticate(options: { required?: boolean } = { required: true 
         if (!admin || admin.status !== 'active') {
           throw new AppError(401, ErrorCode.USER_INACTIVE, 'Platform administrator account is inactive or not found');
         }
+        if (decoded.sv !== admin.sessionVersion) {
+          throw new AppError(401, ErrorCode.SESSION_REVOKED, 'Session has been revoked');
+        }
 
         req.ctx = {
           userId: admin._id.toString(),
@@ -44,6 +48,23 @@ export function authenticate(options: { required?: boolean } = { required: true 
         const user = await User.findById(decoded.sub, null, { skipTenantScope: true });
         if (!user || user.status !== 'active') {
           throw new AppError(401, ErrorCode.USER_INACTIVE, 'User account is inactive or not found');
+        }
+        if (decoded.sv !== user.sessionVersion) {
+          throw new AppError(401, ErrorCode.SESSION_REVOKED, 'Session has been revoked');
+        }
+
+        // Statuses come from a 15-second Redis cache (cleared when the Super Admin changes them),
+        // so this check costs no database read on most requests
+        const businessStatus = await getBusinessStatus(user.businessId);
+        if (businessStatus === 'missing' || businessStatus === 'suspended') {
+          throw new AppError(403, ErrorCode.ACCOUNT_INACTIVE, 'Business account is suspended or inactive');
+        }
+
+        if (user.role === 'branch' && user.branchLoginFor) {
+          const branchStatus = await getBranchStatus(user.branchLoginFor);
+          if (branchStatus === 'missing' || branchStatus === 'deactivated') {
+            throw new AppError(403, ErrorCode.BRANCH_INACTIVE, 'Branch is deactivated');
+          }
         }
 
         req.ctx = {

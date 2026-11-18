@@ -74,6 +74,71 @@ async function assertPayrollOpen(bill: { businessId: Types.ObjectId; branchId: T
   }
 }
 
+
+/** A counter change already written atomically elsewhere must not be applied again on save. */
+function markCounterSaved(customer: any, field: 'walletBalancePaise' | 'loyaltyPoints' | 'duePaise', delta: number) {
+  const loaded = customer.$locals?.loadedCounters;
+  if (loaded) loaded[field] = (loaded[field] || 0) + delta;
+}
+
+/** Customer fields billing changes through counters; everything else it changes is copied as is. */
+const COUNTER_PATHS = ['walletBalancePaise', 'loyaltyPoints', 'duePaise', 'stats.visits', 'stats.spendPaise', 'stats.firstVisit', 'stats.lastVisit'];
+
+/**
+ * Saves billing's changes to a customer as one atomic update: counters as $inc (the difference
+ * from what was read), visit dates with $min / $max, and any other changed field with $set. Two
+ * bills for the same customer at the same moment therefore both count, instead of the second
+ * failing with a version error. A wallet debit only applies while the balance still covers it.
+ */
+async function persistCustomerChanges(customer: any, session: any): Promise<void> {
+  const loaded = customer.$locals?.loadedCounters;
+  if (!loaded) {
+    await customer.save({ session });
+    return;
+  }
+  const inc: Record<string, number> = {};
+  const delta = (path: string, now: number, before: number) => {
+    const d = (now || 0) - (before || 0);
+    if (d !== 0) inc[path] = d;
+  };
+  delta('walletBalancePaise', customer.walletBalancePaise, loaded.walletBalancePaise);
+  delta('loyaltyPoints', customer.loyaltyPoints, loaded.loyaltyPoints);
+  delta('duePaise', customer.duePaise, loaded.duePaise);
+  delta('stats.visits', customer.stats?.visits, loaded.visits);
+  delta('stats.spendPaise', customer.stats?.spendPaise, loaded.spendPaise);
+
+  const update: Record<string, any> = {};
+  if (Object.keys(inc).length) update.$inc = inc;
+  if (customer.stats?.firstVisit && customer.stats.firstVisit !== loaded.firstVisit) update.$min = { 'stats.firstVisit': customer.stats.firstVisit };
+  if (customer.stats?.lastVisit && customer.stats.lastVisit !== loaded.lastVisit) update.$max = { 'stats.lastVisit': customer.stats.lastVisit };
+
+  const set: Record<string, any> = {};
+  // Only fields that were changed directly; counters (and their parent "stats") are handled above
+  for (const path of customer.directModifiedPaths()) {
+    if (COUNTER_PATHS.includes(path) || COUNTER_PATHS.some((c) => c.startsWith(`${path}.`))) continue;
+    set[path] = customer.get(path);
+  }
+  if (Object.keys(set).length) update.$set = set;
+  if (!Object.keys(update).length) return;
+
+  const filter: Record<string, any> = { _id: customer._id, businessId: customer.businessId };
+  if ((inc.walletBalancePaise || 0) < 0) filter.walletBalancePaise = { $gte: -inc.walletBalancePaise };
+  const res = await Customer.updateOne(filter, update, { session });
+  if (res.matchedCount === 0) {
+    throw new AppError(422, 'INSUFFICIENT_WALLET', 'Wallet balance is not enough for this payment');
+  }
+  // The document now matches the database: a second save in the same flow starts from here
+  customer.$locals.loadedCounters = {
+    walletBalancePaise: customer.walletBalancePaise,
+    loyaltyPoints: customer.loyaltyPoints,
+    duePaise: customer.duePaise,
+    visits: customer.stats?.visits || 0,
+    spendPaise: customer.stats?.spendPaise || 0,
+    firstVisit: customer.stats?.firstVisit,
+    lastVisit: customer.stats?.lastVisit,
+  };
+}
+
 export class BillingService {
   /**
    * Helper to format invoice sequence into standard Glox invoice number:
@@ -257,6 +322,7 @@ export class BillingService {
           hsnSac: '9983',
           qty: raw.qty || 1,
           unitPricePaise,
+          allowBillDiscount: raw.allowBillDiscount,
           lineDiscount: raw.lineDiscount,
           staff,
           consumablesUsed: (svc.consumables || []).map((c) => {
@@ -285,6 +351,7 @@ export class BillingService {
           hsnSac: prod.hsn || '3305',
           qty: raw.qty || 1,
           unitPricePaise,
+          allowBillDiscount: raw.allowBillDiscount,
           lineDiscount: raw.lineDiscount,
           staff,
           gstBps: prod.gstBps,
@@ -300,6 +367,7 @@ export class BillingService {
           name: plan.name,
           qty: 1,
           unitPricePaise: plan.pricePaise,
+          allowBillDiscount: raw.allowBillDiscount,
           lineDiscount: raw.lineDiscount,
         });
       }
@@ -836,6 +904,7 @@ export class BillingService {
       }
 
       customer.walletBalancePaise -= walletPayment.amountPaise;
+      markCounterSaved(customer, 'walletBalancePaise', -walletPayment.amountPaise); // already in the database
 
       await new WalletLedger({
         businessId,
@@ -906,6 +975,7 @@ export class BillingService {
           { $inc: { walletBalancePaise: creditPaise } },
           { session }
         );
+        markCounterSaved(customer, 'walletBalancePaise', creditPaise); // already in the database
 
         // Post topup ledger
         await new WalletLedger({
@@ -932,47 +1002,58 @@ export class BillingService {
         }
       } else if (l.kind === 'product') {
         // Retail product stock deduction, at purchase cost (for margin reports)
-        const prod = await Product.findOne({ _id: l.refId, businessId }).select('purchasePricePaise unitsPerPurchase').session(session || null);
+        const prod = await Product.findOne({ _id: l.refId, businessId }).select('purchasePricePaise unitsPerPurchase type').session(session || null);
         const unitCost = prod ? (prod.purchasePricePaise || 0) / (prod.unitsPerPurchase || 1) : 0;
-        await new StockMovement({
-          businessId,
-          branchId,
-          productId: l.refId,
-          pool: 'retail',
-          type: 'sale',
-          qty: -l.qty,
-          costPaise: Math.round(unitCost * l.qty),
-          refType: 'bill',
-          refId: bill._id,
-          businessDate,
-        }).save({ session });
+        const poolsToDeduct: ('retail' | 'consumable')[] =
+          prod?.type === 'both' ? ['retail', 'consumable'] : ['retail'];
 
-        await StockBalance.findOneAndUpdate(
-          { businessId, branchId, productId: l.refId, pool: 'retail' },
-          { $inc: { qty: -l.qty }, $set: { lastMovementAt: new Date() } },
-          { upsert: true, session }
-        );
-      } else if (l.kind === 'service' && l.consumablesUsed) {
-        // Auto-deduct consumables used in service (BR-07)
-        for (const c of l.consumablesUsed) {
+        for (const pool of poolsToDeduct) {
           await new StockMovement({
             businessId,
             branchId,
-            productId: c.productId,
-            pool: 'consumable',
-            type: 'service_use',
-            qty: -c.qty,
-            costPaise: c.costPaise || 0,
+            productId: l.refId,
+            pool,
+            type: 'sale',
+            qty: -l.qty,
+            costPaise: Math.round(unitCost * l.qty),
             refType: 'bill',
             refId: bill._id,
             businessDate,
           }).save({ session });
 
           await StockBalance.findOneAndUpdate(
-            { businessId, branchId, productId: c.productId, pool: 'consumable' },
-            { $inc: { qty: -c.qty }, $set: { lastMovementAt: new Date() } },
+            { businessId, branchId, productId: l.refId, pool },
+            { $inc: { qty: -l.qty }, $set: { lastMovementAt: new Date() } },
             { upsert: true, session }
           );
+        }
+      } else if (l.kind === 'service' && l.consumablesUsed) {
+        // Auto-deduct consumables used in service (BR-07)
+        for (const c of l.consumablesUsed) {
+          const cProd = await Product.findOne({ _id: c.productId, businessId }).select('type').session(session || null);
+          const poolsToDeduct: ('consumable' | 'retail')[] =
+            cProd?.type === 'both' ? ['consumable', 'retail'] : ['consumable'];
+
+          for (const pool of poolsToDeduct) {
+            await new StockMovement({
+              businessId,
+              branchId,
+              productId: c.productId,
+              pool,
+              type: 'service_use',
+              qty: -c.qty,
+              costPaise: c.costPaise || 0,
+              refType: 'bill',
+              refId: bill._id,
+              businessDate,
+            }).save({ session });
+
+            await StockBalance.findOneAndUpdate(
+              { businessId, branchId, productId: c.productId, pool },
+              { $inc: { qty: -c.qty }, $set: { lastMovementAt: new Date() } },
+              { upsert: true, session }
+            );
+          }
         }
       }
     }
@@ -1049,7 +1130,7 @@ export class BillingService {
       customer.stats.firstVisit = businessDate;
     }
 
-    await customer.save({ session });
+    await persistCustomerChanges(customer, session);
 
     // 8. Update DailySummary (upsert using $inc)
     const summaryId = `${branchId.toString()}:${businessDate}`;
@@ -1327,7 +1408,7 @@ export class BillingService {
     // Customer visit stats
     customer.stats.visits = Math.max(0, customer.stats.visits - 1);
     customer.stats.spendPaise = Math.max(0, customer.stats.spendPaise - bill.totals.totalPaise);
-    await customer.save({ session });
+    await persistCustomerChanges(customer, session);
 
     // Daily summary of the bill's own business day
     const collectionsDec: Record<string, number> = {};
@@ -1657,7 +1738,7 @@ export class BillingService {
       }
 
       customer.duePaise = Math.max(0, customer.duePaise - (totalPaid - remainingToAllocate));
-      await customer.save({ session });
+      await persistCustomerChanges(customer, session);
 
       const businessDate = getBusinessDate(new Date());
       const business = await Business.findById(businessId).session(session);

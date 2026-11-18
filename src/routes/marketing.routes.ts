@@ -7,6 +7,7 @@ import {
   createSegmentSchema,
   updateSegmentSchema,
   previewSegmentSchema,
+  previewSegmentCustomersSchema,
   createOfferSchema,
   updateOfferSchema,
   validateOfferSchema,
@@ -71,6 +72,12 @@ marketingRouter.post(
   requireRole('owner', 'manager'),
   validate({ body: previewSegmentSchema }),
   MarketingController.previewSegment
+);
+marketingRouter.post(
+  '/segments/preview/customers',
+  requireRole('owner', 'manager'),
+  validate({ body: previewSegmentCustomersSchema }),
+  MarketingController.previewSegmentCustomers
 );
 marketingRouter.get(
   '/segments/:id',

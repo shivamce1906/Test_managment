@@ -64,6 +64,38 @@ export async function getStockBalances(
   }
   const businessId = toObjectId(ctx.businessId);
 
+  // Sync / ensure balances for products of type 'both' so they appear in both retail and consumable pools
+  if (filter?.pool) {
+    const otherPool = filter.pool === 'consumable' ? 'retail' : 'consumable';
+    const otherBalances = await StockBalance.find({
+      businessId,
+      branchId: toObjectId(branchId),
+      pool: otherPool,
+      qty: { $gt: 0 },
+    }).populate('productId', 'type');
+
+    for (const ob of otherBalances) {
+      if ((ob.productId as any)?.type === 'both') {
+        const existing = await StockBalance.findOne({
+          businessId,
+          branchId: toObjectId(branchId),
+          productId: (ob.productId as any)._id,
+          pool: filter.pool,
+        });
+        if (!existing) {
+          await StockBalance.create({
+            businessId,
+            branchId: toObjectId(branchId),
+            productId: (ob.productId as any)._id,
+            pool: filter.pool,
+            qty: ob.qty,
+            lastMovementAt: ob.lastMovementAt || new Date(),
+          });
+        }
+      }
+    }
+  }
+
   const query: any = { businessId, branchId: toObjectId(branchId) };
   if (filter?.pool) query.pool = filter.pool;
   if (filter?.productId) query.productId = toObjectId(filter.productId);
@@ -146,39 +178,51 @@ export async function adjustStock(
     throw new AppError(422, ErrorCode.VALIDATION_ERROR, 'Internal use takes stock out: qty must be negative', { fields: { qty: 'Use a negative quantity' } });
   }
 
-  return withTransaction(async (session) => {
-    const balance = await StockBalance.findOneAndUpdate(
-      {
-        businessId,
-        branchId: toObjectId(branchId),
-        productId: toObjectId(input.productId),
-        pool: input.pool,
-      },
-      {
-        $inc: { qty: input.qty },
-        $set: { lastMovementAt: new Date() },
-      },
-      { upsert: true, new: true, session }
-    );
+  const poolsToAdjust: ('retail' | 'consumable')[] =
+    product.type === 'both'
+      ? ['retail', 'consumable']
+      : [input.pool];
 
-    const movement = await StockMovement.create(
-      [
+  return withTransaction(async (session) => {
+    let balance: any;
+    let firstMovement: any;
+
+    for (const pool of poolsToAdjust) {
+      const b = await StockBalance.findOneAndUpdate(
         {
           businessId,
           branchId: toObjectId(branchId),
           productId: toObjectId(input.productId),
-          pool: input.pool,
-          type: input.type,
-          qty: input.qty,
-          costPaise: Math.round(unitCost(product) * Math.abs(input.qty)),
-          reason: input.reason,
-          businessDate: getBusinessDate(),
-          createdBy: userId,
-          updatedBy: userId,
+          pool,
         },
-      ],
-      { session }
-    );
+        {
+          $inc: { qty: input.qty },
+          $set: { lastMovementAt: new Date() },
+        },
+        { upsert: true, new: true, session }
+      );
+      if (pool === input.pool) balance = b;
+
+      const m = await StockMovement.create(
+        [
+          {
+            businessId,
+            branchId: toObjectId(branchId),
+            productId: toObjectId(input.productId),
+            pool,
+            type: input.type,
+            qty: input.qty,
+            costPaise: Math.round(unitCost(product) * Math.abs(input.qty)),
+            reason: input.reason,
+            businessDate: getBusinessDate(),
+            createdBy: userId,
+            updatedBy: userId,
+          },
+        ],
+        { session }
+      );
+      if (pool === input.pool) firstMovement = m[0];
+    }
 
     await logAction({
       businessId,
@@ -191,7 +235,7 @@ export async function adjustStock(
       meta: { pool: input.pool, qtyDelta: input.qty, newQty: balance.qty, reason: input.reason },
     });
 
-    const out: any = movement[0].toObject();
+    const out: any = (firstMovement || balance).toObject();
     if (hidesCost(ctx)) delete out.costPaise;
     return { balance, movement: out };
   });
@@ -405,45 +449,54 @@ export async function receivePurchaseOrder(
       const product = await Product.findOne({ _id: toObjectId(receiptItem.productId), businessId }).session(session);
       const unitsPerPurchase = product?.unitsPerPurchase || 1;
       const useUnitsQty = receiptItem.qty * unitsPerPurchase;
-      // 'both' products go to the pool named on the receipt (retail by default)
-      const targetPool = product?.type === 'consumable' ? 'consumable' : product?.type === 'both' ? receiptItem.pool || 'retail' : 'retail';
+      // 'both' products are tracked across both retail and consumable pools unless a specific pool is designated
+      const targetPools: ('retail' | 'consumable')[] =
+        receiptItem.pool
+          ? [receiptItem.pool]
+          : product?.type === 'both'
+          ? ['retail', 'consumable']
+          : product?.type === 'consumable'
+          ? ['consumable']
+          : ['retail'];
 
-      await StockBalance.findOneAndUpdate(
-        {
-          businessId,
-          branchId: po.branchId,
-          productId: toObjectId(receiptItem.productId),
-          pool: targetPool,
-        },
-        {
-          $inc: { qty: useUnitsQty },
-          $set: { lastMovementAt: new Date() },
-        },
-        { upsert: true, session }
-      );
-
-      await StockMovement.create(
-        [
+      for (const targetPool of targetPools) {
+        await StockBalance.findOneAndUpdate(
           {
             businessId,
             branchId: po.branchId,
             productId: toObjectId(receiptItem.productId),
             pool: targetPool,
-            type: 'purchase',
-            qty: useUnitsQty,
-            // Total cost of this receipt line, rounded once to whole paise
-            costPaise: Math.round(item.ratePaise * receiptItem.qty),
-            refType: 'purchaseOrder',
-            refId: po._id,
-            batch: receiptItem.batch,
-            expiry: receiptItem.expiry,
-            businessDate,
-            createdBy: userId,
-            updatedBy: userId,
           },
-        ],
-        { session }
-      );
+          {
+            $inc: { qty: useUnitsQty },
+            $set: { lastMovementAt: new Date() },
+          },
+          { upsert: true, session }
+        );
+
+        await StockMovement.create(
+          [
+            {
+              businessId,
+              branchId: po.branchId,
+              productId: toObjectId(receiptItem.productId),
+              pool: targetPool,
+              type: 'purchase',
+              qty: useUnitsQty,
+              // Total cost of this receipt line, rounded once to whole paise
+              costPaise: Math.round(item.ratePaise * receiptItem.qty),
+              refType: 'purchaseOrder',
+              refId: po._id,
+              batch: receiptItem.batch,
+              expiry: receiptItem.expiry,
+              businessDate,
+              createdBy: userId,
+              updatedBy: userId,
+            },
+          ],
+          { session }
+        );
+      }
     }
 
     const allReceived = po.items.every((it) => it.receivedPurchaseUnits >= it.qtyPurchaseUnits);

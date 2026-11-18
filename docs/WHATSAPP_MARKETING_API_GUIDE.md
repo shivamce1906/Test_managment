@@ -656,5 +656,5 @@ Use the 3-pane layout from the old chat guide; the design is good.
 - The existing WhatsApp tests (29) still pass.
 
 **Atlas, not done yet (needs your go-ahead):**
-- **Drop the old index:** `waMessages` still has the old global unique index `providerMessageId_1`. The new per-business index is created by `npm run build-indexes`, but the old one has to be dropped by hand (`db.waMessages.dropIndex("providerMessageId_1")`). This is the same index behind the deferred index conflict.
+- **Drop the old index:** `waMessages` still has the old global unique index `providerMessageId_1`. The new per-business index is created by `npx tsx scripts/build-indexes.ts`, but the old one has to be dropped by hand (`db.waMessages.dropIndex("providerMessageId_1")`). This is the same index behind the deferred index conflict.
 - **Check for shared accounts:** run a read-only check for numbers whose `uid` or phone is shared between businesses, before relying on the 409.

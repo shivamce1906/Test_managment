@@ -188,6 +188,88 @@ describe('computeBill — membership discount (PRD §8)', () => {
     const wallet = r.lines.find((l) => l.kind === 'wallet_topup')!;
     expect(wallet.taxablePaise).toBe(1000000);
   });
+
+  it('checkout bill discount does NOT apply to membership purchase when combined with services and products', () => {
+    // Service: ₹1,000, Product: ₹500, Membership: ₹2,000. Total = ₹3,500.
+    // Apply 10% (1,000 bps) checkout bill discount.
+    // Discount must apply only to service (₹100 off) and product (₹50 off) = total ₹150 off.
+    // Membership must receive ₹0 discount.
+    const r = run({
+      lines: [
+        svc(100000), // ₹1,000
+        prod(50000, { gstBps: 1800 }), // ₹500
+        { _id: 'm1', kind: 'membership', refId: 'p1', name: 'Gold Club', qty: 1, unitPricePaise: 200000 }, // ₹2,000
+      ],
+      gstApplied: false,
+      billDiscount: { type: 'pct', value: 1000 }, // 10%
+    });
+
+    const svcLine = r.lines.find((l) => l.kind === 'service')!;
+    const prodLine = r.lines.find((l) => l.kind === 'product')!;
+    const membLine = r.lines.find((l) => l.kind === 'membership')!;
+
+    expect(svcLine.discountPaise).toBe(10000); // ₹100
+    expect(svcLine.taxablePaise).toBe(90000); // ₹900
+    expect(prodLine.discountPaise).toBe(5000); // ₹50
+    expect(prodLine.taxablePaise).toBe(45000); // ₹450
+    expect(membLine.discountPaise).toBe(0); // ₹0 discount on membership!
+    expect(membLine.taxablePaise).toBe(200000); // Full ₹2,000 price retained
+    expect(r.totals.discountPaise).toBe(15000); // Total discount is ₹150 (not ₹350)
+    expect(r.totals.taxablePaise).toBe(335000); // ₹900 + ₹450 + ₹2,000 = ₹3,350
+  });
+
+  it('checkout flat amount discount is spread pro-rata only over eligible lines and excludes membership', () => {
+    // Service: ₹1,000, Product: ₹500, Membership: ₹2,000.
+    // Apply ₹300 flat amount bill discount.
+    // ₹300 is distributed between service (₹200) and product (₹100). Membership gets ₹0.
+    const r = run({
+      lines: [
+        svc(100000), // ₹1,000
+        prod(50000, { gstBps: 1800 }), // ₹500
+        { _id: 'm1', kind: 'membership', refId: 'p1', name: 'Gold Club', qty: 1, unitPricePaise: 200000 }, // ₹2,000
+      ],
+      gstApplied: false,
+      billDiscount: { type: 'amount', value: 30000 }, // ₹300
+    });
+
+    const svcLine = r.lines.find((l) => l.kind === 'service')!;
+    const prodLine = r.lines.find((l) => l.kind === 'product')!;
+    const membLine = r.lines.find((l) => l.kind === 'membership')!;
+
+    expect(svcLine.discountPaise).toBe(20000); // ₹200
+    expect(prodLine.discountPaise).toBe(10000); // ₹100
+    expect(membLine.discountPaise).toBe(0); // ₹0 on membership
+    expect(membLine.taxablePaise).toBe(200000); // ₹2,000
+    expect(r.totals.discountPaise).toBe(30000);
+  });
+
+  it('checkout bill discount is 0 when bill contains only a membership', () => {
+    const r = run({
+      lines: [
+        { _id: 'm1', kind: 'membership', refId: 'p1', name: 'Gold Club', qty: 1, unitPricePaise: 200000 },
+      ],
+      gstApplied: false,
+      billDiscount: { type: 'pct', value: 1000 },
+    });
+
+    expect(r.lines[0].discountPaise).toBe(0);
+    expect(r.lines[0].taxablePaise).toBe(200000);
+    expect(r.totals.discountPaise).toBe(0);
+  });
+
+  it('allows checkout bill discount on membership only when allowBillDiscount: true is explicitly passed', () => {
+    const r = run({
+      lines: [
+        { _id: 'm1', kind: 'membership', refId: 'p1', name: 'Gold Club', qty: 1, unitPricePaise: 200000, allowBillDiscount: true },
+      ],
+      gstApplied: false,
+      billDiscount: { type: 'pct', value: 1000 }, // 10%
+    });
+
+    expect(r.lines[0].discountPaise).toBe(20000); // ₹200 discount applied
+    expect(r.lines[0].taxablePaise).toBe(180000); // ₹1,800
+    expect(r.totals.discountPaise).toBe(20000);
+  });
 });
 
 describe('computeBill — package redemption', () => {

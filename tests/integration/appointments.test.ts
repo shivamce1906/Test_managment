@@ -12,8 +12,9 @@ const book = (w: World, token: string, lines: any[], extra: any = {}, branch = w
   as(token).post(`/branches/${branch._id}/appointments`, { customerId: w.customer._id.toString(), lines, source: 'phone', ...extra });
 const line = (svc: any, staff: any, start: string) => ({ serviceId: svc._id.toString(), ...(staff ? { staffId: staff._id.toString() } : {}), start });
 
+useTestDb();
+
 describe('Appointments — booking (PRD §5)', () => {
-  useTestDb();
   let w: World;
   beforeEach(async () => {
     w = await seedWorld();
@@ -85,7 +86,6 @@ describe('Appointments — booking (PRD §5)', () => {
 });
 
 describe('Appointments — slot rules (BR-04, per-staff clashes)', () => {
-  useTestDb();
   let w: World;
   beforeEach(async () => {
     w = await seedWorld();
@@ -231,7 +231,6 @@ describe('Appointments — slot rules (BR-04, per-staff clashes)', () => {
 });
 
 describe('Appointments — status lifecycle and walk-ins', () => {
-  useTestDb();
   let w: World;
   beforeEach(async () => {
     w = await seedWorld();
@@ -325,7 +324,6 @@ describe('Appointments — status lifecycle and walk-ins', () => {
 });
 
 describe('Appointments — concurrency (Backend SRS §12: parallel bookings on one slot -> exactly one succeeds)', () => {
-  useTestDb();
   let w: World;
   beforeEach(async () => {
     w = await seedWorld();

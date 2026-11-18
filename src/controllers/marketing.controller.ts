@@ -64,6 +64,15 @@ export class MarketingController {
     }
   }
 
+  static async previewSegmentCustomers(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { criteria, page, limit, q } = req.body;
+      res.json(await segmentationService.previewSegmentCustomers(req.ctx!, criteria, { page, limit, q }));
+    } catch (err) {
+      next(err);
+    }
+  }
+
   static async getSegmentCustomers(req: Request, res: Response, next: NextFunction) {
     try {
       const result = await segmentationService.getSegmentCustomers(req.ctx!, req.params.id, {

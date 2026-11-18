@@ -8,6 +8,7 @@ import { standardRateLimiter } from './middlewares/rateLimiter';
 import { errorHandler } from './middlewares/errorHandler';
 
 import { healthRouter } from './routes/health.routes';
+import { s3Adapter } from './integrations/s3/s3.adapter';
 import { authRouter } from './routes/auth.routes';
 import { adminRouter } from './routes/admin.routes';
 import { businessRouter } from './routes/business.routes';
@@ -35,7 +36,7 @@ export function createApp() {
   app.use(helmet());
   app.use(cors({ origin: true, credentials: true }));
   app.use(compression());
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true }));
 
   // Request ID and contextual child logger
@@ -64,6 +65,37 @@ export function createApp() {
   app.use(auditRouter);
   app.use(notificationRouter);
   app.use('/marketing', marketingRouter);
+
+  // Local signed upload/download fallback when S3 credentials are not configured
+  app.put('/uploads/local', express.raw({ type: '*/*', limit: '5mb' }), async (req, res, next) => {
+    try {
+      const { key, expires, sig, contentType } = req.query as Record<string, string>;
+      if (!key || !expires || !sig || !s3Adapter.verifyLocalSignature('PUT', key, expires, sig, contentType)) {
+        return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Invalid or expired upload signature' } });
+      }
+      const bodyBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from('');
+      await s3Adapter.uploadBuffer(key, bodyBuffer, contentType || req.headers['content-type'] || 'application/octet-stream');
+      return res.status(200).json({ key, size: bodyBuffer.length });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  app.get('/uploads/local', async (req, res, next) => {
+    try {
+      const { key, expires, sig } = req.query as Record<string, string>;
+      if (!key || !expires || !sig || !s3Adapter.verifyLocalSignature('GET', key, expires, sig)) {
+        return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Invalid or expired download signature' } });
+      }
+      const buffer = await s3Adapter.getBuffer(key);
+      if (!buffer || buffer.length === 0) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'File not found' } });
+      }
+      return res.send(buffer);
+    } catch (err) {
+      return next(err);
+    }
+  });
 
 
   // 404 Handler

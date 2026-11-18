@@ -48,11 +48,21 @@ export async function ingestChatList(config: InstantBroadcastSocketConfig, data:
     if (last.route === 'INCOMING') {
       const mobile = String(chat.sender_mobile || last.senderMobile || '').replace(/\D/g, '');
       if (!mobile) continue;
+      // Media comes as { type: 'image', msgContext: { image: { link, caption? } }, text: { body: '' } }
+      // (seen live 2026-11-13); the same shape holds for video, audio, document and sticker.
+      const type = String(last.type || last.msgContext?.type || 'text');
+      const media = type === 'text' ? undefined : last.msgContext?.[type];
+      const mediaUrl: string | undefined =
+        last.mediaUrl || (typeof media?.link === 'string' && media.link ? media.link : undefined);
+      const body: string | undefined =
+        last.text?.body || last.msgContext?.text?.body || media?.caption || last.caption || undefined;
       await processInboundWebhook(config.numberId, {
         from: `+${mobile}`,
-        text: last.text?.body ?? last.msgContext?.text?.body ?? last.caption ?? undefined,
+        // A type we can't show (location, contacts, …) is still stored, so it isn't replayed
+        text: body || (!mediaUrl && type !== 'text' ? `[${type}]` : undefined),
         providerMessageId: last.metaChatId,
-        mediaUrl: last.mediaUrl || undefined,
+        mediaUrl,
+        mediaType: mediaUrl ? type : undefined,
         senderName: chat.sender_name || last.senderName || undefined,
         providerChatId: chat.chat_id,
         // Unix seconds; the list replays old chats, so this keeps their 24-hour window honest
@@ -66,6 +76,8 @@ export async function ingestChatList(config: InstantBroadcastSocketConfig, data:
 
 class InstantBroadcastSocketManager {
   private sockets: Map<string, Socket> = new Map();
+  /** What each open socket was built for: its handlers route events with this config. */
+  private configs: Map<string, InstantBroadcastSocketConfig> = new Map();
   private wsUrl: string;
 
   constructor() {
@@ -77,13 +89,23 @@ class InstantBroadcastSocketManager {
    */
   public connectAccount(config: InstantBroadcastSocketConfig): Socket {
     const existing = this.sockets.get(config.uid);
-    if (existing && existing.connected) {
+    const previous = this.configs.get(config.uid);
+    // Reuse a live socket only if it was built for the same business, number and key. The event
+    // handlers capture the config, so an account moved to another business (or given a new key)
+    // must get a fresh socket, or its messages keep landing in the old business.
+    const sameConfig =
+      previous?.businessId === config.businessId &&
+      previous?.numberId === config.numberId &&
+      previous?.userToken === config.userToken;
+    if (existing && existing.connected && sameConfig) {
       return existing;
     }
 
     if (existing) {
+      existing.removeAllListeners();
       existing.disconnect();
     }
+    this.configs.set(config.uid, config);
 
     logger.info({ uid: config.uid, wsUrl: this.wsUrl }, 'Connecting to Instant Broadcast WebSocket engine');
 
@@ -250,6 +272,7 @@ class InstantBroadcastSocketManager {
       } catch {}
     }
     this.sockets.clear();
+    this.configs.clear();
   }
 }
 

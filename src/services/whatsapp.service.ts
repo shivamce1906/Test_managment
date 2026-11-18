@@ -19,17 +19,18 @@ import {
   AutomationSend,
   withTransaction,
 } from '../models';
-import { AppError, ErrorCode, normalizePhone, encrypt, decrypt, logger } from '../utils';
+import { AppError, ErrorCode, normalizePhone, encrypt, decrypt, logger, getBusinessDate, formatIstTime } from '../utils';
 import { RequestContext, toObjectId } from './context';
 import { logAction } from './audit.service';
 import {
+  instantBroadcastAdapter,
   sendInstantBroadcastMessage,
   fetchInstantBroadcastTemplates,
   instantBroadcastSocket,
   getRedisClient,
 } from '../integrations';
 import { emitToBranch } from '../socket';
-import { whatsappSendQueue } from '../workers/queues';
+import { whatsappSendQueue, campaignSendQueue } from '../workers/queues';
 import { z } from 'zod';
 import {
   configureWaNumberSchema,
@@ -59,6 +60,12 @@ export async function configureWaNumber(
   const phone = normalizePhone(input.phone);
   const rawToken = input.userToken || input.apiKey || '';
   const uid = input.uid || input.projectId || '';
+
+  const connectionCheck = await instantBroadcastAdapter.verifyConnection(rawToken, uid);
+  if (connectionCheck.unauthorized) {
+    throw new AppError(422, ErrorCode.WA_NOT_CONFIGURED, connectionCheck.error || 'WhatsApp provider rejected these credentials');
+  }
+
   const tokenEnc = encrypt(rawToken);
 
   // One WhatsApp account belongs to one business: webhooks are routed by uid, so a shared uid would mix salons
@@ -142,7 +149,11 @@ export async function configureWaNumber(
   await syncWaTemplates({ ...ctx, businessId: businessId.toString() }, waNum._id);
 
   // Shown to the Super Admin so they can paste it into the provider's webhook settings
-  return { ...waNum.toObject(), webhookUrl: `/webhooks/instantbroadcast/${uid || waNum._id}?secret=${webhookSecret}` };
+  return {
+    ...waNum.toObject(),
+    webhookUrl: `/webhooks/instantbroadcast/${uid || waNum._id}?secret=${webhookSecret}`,
+    connectionCheck,
+  };
 }
 
 export async function getWaNumbers(ctx: RequestContext) {
@@ -358,6 +369,52 @@ export async function sendMessage(
     templateName = tmpl.name;
   }
 
+  // Handle scheduled message dispatch (optimistic delayed queue)
+  const scheduledDate = input.scheduledAt ? new Date(input.scheduledAt) : undefined;
+  const isScheduled = !!scheduledDate && !Number.isNaN(scheduledDate.getTime()) && scheduledDate.getTime() > Date.now();
+
+  if (isScheduled && scheduledDate) {
+    const message = await WaMessage.create({
+      businessId: ctx.businessId,
+      conversationId: conv._id,
+      direction: 'out',
+      kind: input.templateId ? 'template' : 'text',
+      text: input.text,
+      templateId: input.templateId ? new Types.ObjectId(input.templateId) : undefined,
+      variables: input.variables,
+      status: 'queued',
+      origin: 'inbox',
+      sentBy: ctx.userId,
+      createdBy: ctx.userId,
+      updatedBy: ctx.userId,
+    });
+
+    conv.lastMessageAt = new Date();
+    await conv.save();
+
+    const delay = Math.max(0, scheduledDate.getTime() - Date.now());
+    try {
+      await whatsappSendQueue().add(
+        'send',
+        { messageId: message._id.toString() },
+        { delay, jobId: message._id.toString() }
+      );
+    } catch (err: any) {
+      logger.warn({ err, messageId: message._id }, 'Notice: whatsappSendQueue delayed add failed');
+    }
+
+    // Notify frontend clients via socket (optimistic UI update)
+    emitToBranch(ctx.businessId.toString(), conv.branchId.toString(), 'wa:new_message', {
+      conversationId: conv._id,
+      message,
+    });
+
+    const redis = getRedisClient();
+    await redis.incr(`chg:${ctx.businessId}:whatsapp`);
+
+    return message;
+  }
+
   const sendResult = await sendInstantBroadcastMessage({
     apiKey: token,
     userToken: token,
@@ -370,6 +427,22 @@ export async function sendMessage(
     text: input.text,
     kind: input.templateId ? 'template' : 'text',
   });
+
+  // A successful send proves the WhatsApp balance is fine again (F-23): clear the low-balance flag
+  // and tell the owner. Campaigns paused for low balance stay paused until the owner resumes them.
+  if (sendResult.success && !sendResult.lowBalance && waNum.lowBalance) {
+    await WaNumber.updateOne({ _id: waNum._id, businessId: waNum.businessId }, { $set: { lowBalance: false } });
+    const owner = await User.findOne({ businessId: waNum.businessId, role: 'owner', status: 'active' }).select('_id');
+    if (owner) {
+      await Notification.create({
+        businessId: waNum.businessId,
+        userId: owner._id,
+        type: 'wa_balance_restored',
+        title: 'WhatsApp balance restored',
+        body: 'Messages are going out again. Campaigns paused for low balance stay paused until you resume them.',
+      });
+    }
+  }
 
   const message = await WaMessage.create({
     businessId: ctx.businessId,
@@ -599,6 +672,22 @@ export async function applyMessageStatus(businessId: Types.ObjectId | string, pr
   return true;
 }
 
+
+/** Milliseconds until quiet hours (IST, e.g. 21:00-09:00) end, or 0 when it is not quiet now. */
+function msUntilQuietEnds(quietStart: string, quietEnd: string, now: Date = new Date()): number {
+  const toMin = (hhmm: string) => {
+    const [h, m] = hhmm.split(':').map(Number);
+    return h * 60 + (m || 0);
+  };
+  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+  const cur = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  const start = toMin(quietStart);
+  const end = toMin(quietEnd);
+  const quiet = start <= end ? cur >= start && cur < end : cur >= start || cur < end;
+  if (!quiet) return 0;
+  return (((end - cur + 24 * 60) % (24 * 60)) || 24 * 60) * 60 * 1000;
+}
+
 export async function processInboundWebhook(
   numberId: string | Types.ObjectId,
   payload: {
@@ -607,6 +696,8 @@ export async function processInboundWebhook(
     providerMessageId?: string;
     status?: string;
     mediaUrl?: string;
+    /** image | video | audio | document | sticker, when mediaUrl is set. */
+    mediaType?: string;
     senderName?: string;
     providerChatId?: string;
     /** When the customer sent it (providers replay old messages); defaults to now. */
@@ -615,6 +706,7 @@ export async function processInboundWebhook(
 ) {
   const waNum = await findWaNumberForWebhook(numberId);
   if (!waNum) return;
+  const storable = Boolean(payload.text || payload.mediaUrl);
   const now = new Date();
   const sentAt = payload.sentAt && !Number.isNaN(payload.sentAt.getTime()) && payload.sentAt < now ? payload.sentAt : now;
   const later = (a: Date | undefined) => (a && a > sentAt ? a : sentAt);
@@ -634,6 +726,10 @@ export async function processInboundWebhook(
     });
     if (existing) return;
   }
+
+  // Nothing to store: leave the chat alone. A message we can't store is never seen as a duplicate,
+  // so counting it would add one unread every time the provider replays its chat list.
+  if (!storable) return;
 
   // 3. Find or link Customer / Lead
   const customer = await Customer.findOne({ businessId: waNum.businessId, phone });
@@ -704,7 +800,7 @@ export async function processInboundWebhook(
   }
 
   // 5. Create inbound message
-  if (payload.text || payload.mediaUrl) {
+  if (storable) {
     const msg = await WaMessage.create({
       businessId: waNum.businessId,
       conversationId: conv._id,
@@ -713,6 +809,7 @@ export async function processInboundWebhook(
       kind: payload.mediaUrl ? 'media' : 'text',
       text: payload.text,
       mediaUrl: payload.mediaUrl,
+      mediaType: payload.mediaUrl ? payload.mediaType : undefined,
       senderName: payload.senderName,
       status: 'delivered',
       origin: 'inbox',
@@ -766,7 +863,7 @@ export async function processInboundWebhook(
             staffIds,
             rating: ratingNum as any,
             comment: payload.text,
-            reviewLinkSent: isHighRating,
+            reviewLinkSent: false, // set to true below only if the review link is actually queued
           });
 
           if (ratingNum <= 3) {
@@ -782,23 +879,65 @@ export async function processInboundWebhook(
             }
           } else if (isHighRating && branchId) {
             const branch = await Branch.findOne({ _id: branchId, businessId: waNum.businessId });
-            if (branch?.googleReviewUrl) {
-              const reviewMsg = await WaMessage.create({
-                businessId: waNum.businessId,
-                conversationId: conv._id,
-                direction: 'out',
-                kind: 'text',
-                text: `Thank you so much for your kind rating! ⭐ If you have a moment, we would love it if you could share your review on Google: ${branch.googleReviewUrl}`,
-                origin: 'automation',
-                originId: feedback._id,
-                status: 'queued',
-              });
+            // Sent only when the owner switched "review_push" on (off by default). It is a marketing
+            // message: it counts towards the daily marketing limit and waits for quiet hours to end.
+            const reviewAuto = await Automation.findOne({ businessId: waNum.businessId, key: 'review_push', enabled: true });
+            const business = await Business.findById(waNum.businessId).select('automationGuards').lean();
+            const guards: any = business?.automationGuards || {};
+            const todayStr = getBusinessDate();
+            const maxPerDay = Number.isInteger(guards.maxMarketingPerDay) ? guards.maxMarketingPerDay : 1;
+            const marketingToday = conv.customerId
+              ? await AutomationSend.countDocuments({ businessId: waNum.businessId, _id: { $regex: `^mktcap:${conv.customerId}:${todayStr}:` } })
+              : 0;
+            const underCap = maxPerDay > 0 && marketingToday < maxPerDay;
+            if (branch?.googleReviewUrl && reviewAuto && underCap) {
+              const dedupeKey = `review_push:${feedback._id}`;
+              const already = await AutomationSend.findById(dedupeKey);
+              if (!already) {
+                const reviewTpl = reviewAuto?.templateId
+                  ? await WaTemplate.findOne({ _id: reviewAuto.templateId, businessId: waNum.businessId, status: 'approved' })
+                  : await WaTemplate.findOne({ businessId: waNum.businessId, name: 'review_push', status: 'approved' });
+                const custDoc = await Customer.findOne({ _id: conv.customerId, businessId: waNum.businessId });
+                const reviewMsg = await WaMessage.create({
+                  businessId: waNum.businessId,
+                  conversationId: conv._id,
+                  direction: 'out',
+                  kind: reviewTpl ? 'template' : 'text',
+                  templateId: reviewTpl?._id,
+                  variables: reviewTpl ? [custDoc?.name || 'Customer', branch.googleReviewUrl] : undefined,
+                  text: `Thank you so much for your kind rating! ⭐ If you have a moment, we would love it if you could share your review on Google: ${branch.googleReviewUrl}`,
+                  origin: 'automation',
+                  originId: feedback._id,
+                  status: 'queued',
+                });
 
-              await whatsappSendQueue().add(
-                'send',
-                { messageId: reviewMsg._id.toString() },
-                { jobId: reviewMsg._id.toString() }
-              );
+                await AutomationSend.create({
+                  _id: dedupeKey,
+                  businessId: waNum.businessId,
+                  messageId: reviewMsg._id,
+                  at: new Date(),
+                });
+                if (conv.customerId) {
+                  await AutomationSend.create({
+                    _id: `mktcap:${conv.customerId}:${todayStr}:${reviewMsg._id}`,
+                    businessId: waNum.businessId,
+                    messageId: reviewMsg._id,
+                    at: new Date(),
+                  });
+                }
+
+                // In quiet hours (IST) the message waits until they end
+                const delay = msUntilQuietEnds(guards.quietStart || '21:00', guards.quietEnd || '09:00');
+                // A queue problem must not fail the customer's incoming message (the webhook would be retried)
+                await whatsappSendQueue()
+                  .add(
+                    'send',
+                    { messageId: reviewMsg._id.toString(), businessId: String(waNum.businessId) },
+                    { jobId: reviewMsg._id.toString(), ...(delay > 0 ? { delay } : {}) }
+                  )
+                  .catch((err: any) => logger.warn({ err, messageId: reviewMsg._id }, 'Review message could not be queued'));
+                await Feedback.updateOne({ _id: feedback._id, businessId: waNum.businessId }, { $set: { reviewLinkSent: true } });
+              }
             }
           }
         }
@@ -854,6 +993,9 @@ export async function createCampaign(
     excluded = totalAll - totalAudience;
   }
 
+  const scheduledDate = input.scheduledAt ? new Date(input.scheduledAt) : undefined;
+  const isScheduled = !!scheduledDate && !Number.isNaN(scheduledDate.getTime());
+
   const campaign = await Campaign.create({
     businessId: ctx.businessId,
     name: input.name,
@@ -863,12 +1005,27 @@ export async function createCampaign(
       ...input.audience,
     },
     variableMap: input.variableMap,
-    status: input.scheduledAt ? 'scheduled' : 'draft',
-    scheduledAt: input.scheduledAt ? new Date(input.scheduledAt) : undefined,
+    status: isScheduled ? 'scheduled' : 'draft',
+    scheduledAt: scheduledDate,
     stats: { total: totalAudience, sent: 0, delivered: 0, read: 0, failed: 0, excluded, costPaise: 0 },
     createdBy: ctx.userId,
     updatedBy: ctx.userId,
   });
+
+  // Schedule BullMQ job if scheduledAt is provided
+  if (isScheduled && scheduledDate) {
+    try {
+      const delay = Math.max(0, scheduledDate.getTime() - Date.now());
+      await campaignSendQueue().add(
+        'send',
+        { campaignId: campaign._id.toString(), businessId: ctx.businessId.toString() },
+        { delay, jobId: `campaign_${campaign._id}_${Date.now()}` }
+      );
+      logger.info({ campaignId: campaign._id, delay }, 'Scheduled campaign enqueued to BullMQ');
+    } catch (err: any) {
+      logger.warn({ err, campaignId: campaign._id }, 'Notice: BullMQ campaignSendQueue add failed');
+    }
+  }
 
   await logAction({
     businessId: ctx.businessId,
@@ -894,9 +1051,38 @@ export async function getCampaigns(ctx: RequestContext) {
     .sort({ createdAt: -1 });
 }
 
+const ALL_AUTOMATION_KEYS = [
+  'booking_confirmation',
+  'reminder_24h',
+  'reminder_2h',
+  'rebooking',
+  'birthday',
+  'anniversary',
+  'winback',
+  'feedback',
+  'review_push',
+  'membership_expiry',
+  'package_last_session',
+] as const;
+
 export async function getAutomations(ctx: RequestContext) {
   if (!ctx.businessId) {
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
+  }
+
+  const existing = await Automation.find({ businessId: ctx.businessId }).select('key');
+  const existingKeys = new Set(existing.map((a) => a.key));
+  const missingKeys = ALL_AUTOMATION_KEYS.filter((k) => !existingKeys.has(k));
+  if (missingKeys.length > 0) {
+    await Automation.insertMany(
+      missingKeys.map((key) => ({
+        businessId: ctx.businessId,
+        key,
+        enabled: false,
+        settings: {},
+      })),
+      { ordered: false }
+    ).catch(() => {});
   }
 
   return Automation.find({ businessId: ctx.businessId }).populate('templateId', 'name body');
@@ -911,35 +1097,29 @@ export async function updateAutomation(
     throw new AppError(400, ErrorCode.TENANT_SCOPE_MISSING, 'Business context missing');
   }
 
-  const VALID_KEYS = [
-    'booking_confirmation',
-    'reminder_24h',
-    'reminder_2h',
-    'rebooking',
-    'birthday',
-    'anniversary',
-    'winback',
-    'feedback',
-    'review_push',
-    'membership_expiry',
-    'package_last_session',
-  ];
-  if (!VALID_KEYS.includes(key)) {
+  if (!(ALL_AUTOMATION_KEYS as readonly string[]).includes(key)) {
     throw new AppError(400, ErrorCode.BAD_REQUEST, `Invalid automation key: ${key}`);
+  }
+
+  const updateSet: Record<string, any> = {
+    enabled: input.enabled,
+    updatedBy: ctx.userId,
+  };
+  if (input.templateId !== undefined) {
+    updateSet.templateId = input.templateId ? new Types.ObjectId(input.templateId) : undefined;
+  }
+  if (input.settings !== undefined) {
+    updateSet.settings = input.settings;
   }
 
   const auto = await Automation.findOneAndUpdate(
     { businessId: ctx.businessId, key },
     {
-      businessId: ctx.businessId,
-      key,
-      enabled: input.enabled,
-      templateId: input.templateId ? new Types.ObjectId(input.templateId) : undefined,
-      settings: input.settings || {},
-      updatedBy: ctx.userId,
+      $set: updateSet,
+      $setOnInsert: { businessId: ctx.businessId, key },
     },
     { upsert: true, new: true }
-  );
+  ).populate('templateId', 'name body');
 
   await logAction({
     businessId: ctx.businessId,
@@ -984,7 +1164,8 @@ export async function submitFeedback(
       staffIds: input.staffIds.map((id) => new Types.ObjectId(id)),
       rating: input.rating,
       comment: input.comment,
-      reviewLinkSent: isHighRating,
+      // Feedback entered by staff does not send a review link (only a customer's WhatsApp reply does)
+      reviewLinkSent: false,
       createdBy: ctx.userId,
       updatedBy: ctx.userId,
     },
@@ -1006,6 +1187,86 @@ export async function submitFeedback(
 }
 
 /**
+ * Sends a Booking Confirmation WhatsApp notification when enabled for the business.
+ */
+export async function sendBookingConfirmationMessage(
+  appointmentId: string | Types.ObjectId
+): Promise<void> {
+  const appt = await Appointment.findById(appointmentId).setOptions({ skipTenantScope: true });
+  if (!appt || appt.status === 'cancelled') return;
+
+  const auto = await Automation.findOne({ businessId: appt.businessId, key: 'booking_confirmation' });
+  if (!auto || !auto.enabled) return;
+
+  const customer = await Customer.findOne({ _id: appt.customerId, businessId: appt.businessId });
+  if (!customer || !customer.phone || customer.doNotMessage || customer.waOptIn === false) return;
+
+  const dedupeId = `booking_confirmation:${appt._id}`;
+  if (await AutomationSend.findById(dedupeId)) return;
+
+  const waNumber = await WaNumber.findOne({ businessId: appt.businessId, status: 'active' });
+  if (!waNumber) return;
+
+  const [branch, business] = await Promise.all([
+    Branch.findOne({ _id: appt.branchId, businessId: appt.businessId }),
+    Business.findById(appt.businessId),
+  ]);
+  const salonName = branch?.name || business?.name || 'our salon';
+
+  let conversation = await WaConversation.findOne({
+    businessId: appt.businessId,
+    numberId: waNumber._id,
+    phone: customer.phone,
+  });
+
+  if (!conversation) {
+    conversation = await WaConversation.create({
+      businessId: appt.businessId,
+      numberId: waNumber._id,
+      branchId: appt.branchId,
+      phone: customer.phone,
+      customerId: customer._id,
+      lastMessageAt: new Date(),
+      unread: 0,
+    });
+  }
+
+  const tpl = auto.templateId
+    ? await WaTemplate.findOne({ _id: auto.templateId, businessId: appt.businessId, status: 'approved' })
+    : await WaTemplate.findOne({ businessId: appt.businessId, name: 'booking_confirmation', status: 'approved' });
+
+  const dateStr = appt.businessDate || getBusinessDate(appt.start);
+  const timeStr = formatIstTime(appt.start);
+  const confirmText = `Hi ${customer.name}, your appointment at ${salonName} is confirmed for ${dateStr} at ${timeStr}.`;
+
+  const msg = await WaMessage.create({
+    businessId: appt.businessId,
+    conversationId: conversation._id,
+    direction: 'out',
+    kind: tpl ? 'template' : 'text',
+    templateId: tpl?._id,
+    variables: tpl ? [customer.name, salonName, dateStr, timeStr] : undefined,
+    text: confirmText,
+    origin: 'automation',
+    originId: appt._id,
+    status: 'queued',
+  });
+
+  await AutomationSend.create({
+    _id: dedupeId,
+    businessId: appt.businessId,
+    messageId: msg._id,
+    at: new Date(),
+  });
+
+  await whatsappSendQueue().add(
+    'send',
+    { messageId: msg._id.toString() },
+    { jobId: msg._id.toString() }
+  );
+}
+
+/**
  * Sends a Thank You & 1-5 feedback WhatsApp prompt immediately after an appointment is completed.
  */
 export async function sendAppointmentFeedbackMessage(
@@ -1013,6 +1274,9 @@ export async function sendAppointmentFeedbackMessage(
 ): Promise<void> {
   const appt = await Appointment.findById(appointmentId).setOptions({ skipTenantScope: true });
   if (!appt || appt.status !== 'completed') return;
+
+  const feedbackAuto = await Automation.findOne({ businessId: appt.businessId, key: 'feedback' });
+  if (feedbackAuto && !feedbackAuto.enabled) return;
 
   const customer = await Customer.findOne({ _id: appt.customerId, businessId: appt.businessId });
   if (!customer || !customer.phone || customer.doNotMessage || customer.waOptIn === false) return;
@@ -1046,12 +1310,14 @@ export async function sendAppointmentFeedbackMessage(
     });
   }
 
-  // Look for post_service_feedback template if approved
-  const tpl = await WaTemplate.findOne({
-    businessId: appt.businessId,
-    name: 'post_service_feedback',
-    status: 'approved',
-  });
+  // Look for configured automation template or approved post_service_feedback template
+  const tpl = feedbackAuto?.templateId
+    ? await WaTemplate.findOne({ _id: feedbackAuto.templateId, businessId: appt.businessId, status: 'approved' })
+    : await WaTemplate.findOne({
+        businessId: appt.businessId,
+        name: 'post_service_feedback',
+        status: 'approved',
+      });
 
   const feedbackText = `Hi ${customer.name}, thank you for visiting ${salonName} today! ✨ We hope you loved your service. How would you rate your experience with us? Please reply with a number from 1 to 5 (1 = Poor, 5 = Excellent).`;
 

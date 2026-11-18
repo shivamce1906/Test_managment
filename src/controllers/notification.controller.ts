@@ -6,7 +6,19 @@ import {
   getChanges,
 } from '../services';
 import { s3Adapter } from '../integrations';
+import { AppError, ErrorCode } from '../utils';
 import { randomUUID } from 'crypto';
+
+const EXT_BY_CONTENT_TYPE: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'application/pdf': 'pdf',
+  'text/csv': 'csv',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-excel': 'xls',
+};
 
 export class NotificationController {
   public static async getNotifications(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -57,14 +69,25 @@ export class NotificationController {
 
   public static async presignUpload(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { filename, contentType } = req.body;
-      const extension = filename ? filename.split('.').pop() : 'bin';
-      const key = `uploads/${req.ctx.businessId || 'platform'}/${Date.now()}-${randomUUID()}.${extension}`;
-      const presignedUrl = await s3Adapter.getPresignedPutUrl(key, contentType || 'application/octet-stream');
+      const { kind, filename, contentType } = req.body;
+      const normalizedCt = String(contentType || '').toLowerCase();
+      const defaultExt = EXT_BY_CONTENT_TYPE[normalizedCt];
+      if (!defaultExt) {
+        throw new AppError(400, ErrorCode.VALIDATION_ERROR, `Disallowed upload contentType: ${contentType}`);
+      }
+
+      const rawExt = filename && typeof filename === 'string' && filename.includes('.')
+        ? filename.split('.').pop()!.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
+        : '';
+      const extension = rawExt || defaultExt;
+      const folder = kind ? String(kind).replace(/[^a-zA-Z0-9_-]/g, '') : 'uploads';
+      const key = `${folder}/${req.ctx.businessId || 'platform'}/${Date.now()}-${randomUUID()}.${extension}`;
+      const url = await s3Adapter.getPresignedPutUrl(key, normalizedCt);
 
       res.json({
         key,
-        uploadUrl: presignedUrl,
+        url,
+        uploadUrl: url,
       });
     } catch (err) {
       next(err);
